@@ -1,0 +1,39 @@
+# Admin e saude
+
+Rotas administrativas globais usam token `ADMIN_ACCESS` e nao compartilham permissoes com administradores de empresa.
+
+## Plataforma
+
+{% endpoint method="GET" path="/api/admin/me" %}
+Retorna o administrador global autenticado.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/admin/organizations" %}
+Lista organizations da plataforma.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/admin/organizations" %}
+Cria organization.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/admin/organizations/:id" %}
+Atualiza nome ou status da organization.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/admin/companies" %}
+Lista empresas da plataforma para suporte/operacao global.
+{% /endpoint %}
+
+## Saude
+
+{% endpoint method="GET" path="/health" %}
+Verifica se o processo da API esta vivo.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/ready" %}
+Verifica dependencias essenciais. Nao retorna dados internos sensiveis.
+{% /endpoint %}
+
+{% callout title="Separacao obrigatoria" tone="danger" %}
+`COMPANY_ADMIN` nao e `PLATFORM_ADMIN`. Um token `USER_ACCESS` nunca deve funcionar em `/api/admin/*`.
+{% /callout %}

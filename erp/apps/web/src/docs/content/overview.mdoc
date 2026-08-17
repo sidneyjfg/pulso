@@ -1,0 +1,72 @@
+# Visao geral
+
+Pulso e um ERP SaaS para pequenos negocios brasileiros que precisam enxergar vendas, estoque, lojas e pendencias sem depender de planilhas ou relatorios dificeis.
+
+A promessa do produto e dar ao dono da empresa o pulso da operacao antes do fechamento do mes: o que vendeu hoje, quais produtos estao acabando, qual loja precisa de atencao, quais compras ainda nao viraram estoque e quais dados fiscais podem ser resolvidos depois.
+
+Internamente, o sistema nasce preparado para organizacoes, empresas, lojas, depositos, usuarios, permissoes, estoque por ledger, auditoria e integracoes futuras. Na interface, essa complexidade deve aparecer como linguagem simples: minha empresa, minha loja, meu estoque e minhas vendas.
+
+Esta documentacao descreve o backend atual do Pulso. Ela e escrita em Markdoc e organizada por dominio, seguindo a mesma divisao usada na API.
+
+## Para quem e
+
+- Pequenas lojas que precisam sair da planilha sem virar refem de um ERP complexo.
+- Operacoes com mais de uma loja que precisam comparar vendas e estoque por filial.
+- Empresas que querem migrar de outro ERP com seguranca, usando staging e validacao antes de gravar dados oficiais.
+- Negocios que ainda nao precisam emitir nota pelo sistema, mas querem deixar a base fiscal pronta.
+
+## O que esta fora desta versao
+
+- Emissao de NF-e e NFC-e.
+- Integracoes reais com iFood, 99Food e marketplaces.
+- Processos administrativos globais completos de planos e assinaturas.
+
+Esses pontos estao previstos na arquitetura, mas nao fazem parte do escopo funcional atual.
+
+{% callout title="Base URL" %}
+Em desenvolvimento, a API responde em `http://localhost:3333`. Todas as rotas publicas de negocio usam o prefixo `/api/v1`.
+{% /callout %}
+
+## Principios da API
+
+- Toda rota autenticada valida o token no backend.
+- O contexto ativo da empresa e da loja vem do token validado.
+- `companyId`, `branchId`, `userId`, `role` e `permissions` enviados no body sao ignorados.
+- Recursos multiempresa sao consultados com filtro de tenant.
+- Operacoes que alteram estoque sempre criam `StockMovement`.
+- Operacoes sensiveis geram `AuditLog`.
+
+## Cabecalhos
+
+{% field name="Authorization" type="string" required=true %}
+Use `Bearer <accessToken>` retornado pelo login.
+{% /field %}
+
+{% field name="x-correlation-id" type="string" %}
+Opcional. Quando ausente, a API gera um identificador de correlacao por request.
+{% /field %}
+
+## Dominios disponiveis
+
+| Dominio | Prefixo | Estado |
+| --- | --- | --- |
+| Autenticacao | `/api/v1/auth` | Implementado |
+| Fundacao | `/api/v1/me`, companies, branches, users | Implementado |
+| Produtos | `/api/v1/products`, `/api/v1/categories` | Implementado |
+| Estoque | `/api/v1/inventory` | Implementado |
+| Operacao | `/api/v1/sales`, `/api/v1/purchases` | Implementado |
+| Dashboard | `/api/v1/dashboard` | Implementado |
+| Fiscal | `/api/v1/fiscal` | Implementado, sem emissao de nota |
+
+## Padrao de resposta paginada
+
+Listagens retornam `data` e `nextCursor`.
+
+```json
+{
+  "data": [],
+  "nextCursor": null
+}
+```
+
+O limite padrao e `25`. O maximo aceito e `100`.

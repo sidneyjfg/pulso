@@ -1,0 +1,63 @@
+# Estoque
+
+Estoque e controlado por ledger. Toda alteracao de saldo gera um `StockMovement`.
+
+## Saldos e movimentos
+
+{% endpoint method="GET" path="/api/v1/inventory/balances" %}
+Lista saldos da loja ativa. Filtros: `warehouseId`, `productId`, `search`, `limit`, `cursor`.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/inventory/movements" %}
+Lista movimentos da loja ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/inventory/adjustments" %}
+Corrige estoque manualmente e cria movimento `MANUAL_ADJUSTMENT`.
+
+```json
+{
+  "productId": "...",
+  "warehouseId": "...",
+  "quantityDelta": "-2",
+  "reason": "Contagem de balcao",
+  "idempotencyKey": "ajuste-123"
+}
+```
+{% /endpoint %}
+
+## Transferencias
+
+{% endpoint method="POST" path="/api/v1/inventory/transfers" %}
+Cria transferencia entre depositos ou lojas. Criar a transferencia nao baixa estoque.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/inventory/transfers" %}
+Lista transferencias relacionadas a loja ativa, como origem ou destino.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/inventory/transfers/:id/send" %}
+Envia transferencia e gera `TRANSFER_OUT` na origem.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/inventory/transfers/:id/receive" %}
+Recebe transferencia e gera `TRANSFER_IN` no destino.
+{% /endpoint %}
+
+## Inventario fisico
+
+{% endpoint method="POST" path="/api/v1/inventory/counts" %}
+Cria uma contagem fisica em rascunho.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/inventory/counts" %}
+Lista inventarios fisicos da loja ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/inventory/counts/:id/confirm" %}
+Compara contado x ERP e cria `INVENTORY_ADJUSTMENT` para divergencias.
+{% /endpoint %}
+
+{% callout title="Concorrencia" tone="warning" %}
+Saidas de estoque usam transacao e update condicional para evitar vender ou transferir mais do que o saldo disponivel.
+{% /callout %}

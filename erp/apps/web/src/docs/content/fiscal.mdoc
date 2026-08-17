@@ -1,0 +1,80 @@
+# Fiscal
+
+A base fiscal prepara o ERP para emissao futura, mas a versao atual nao emite NF-e nem NFC-e.
+
+## Perfil fiscal da empresa
+
+{% endpoint method="GET" path="/api/v1/fiscal/company-profile" %}
+Retorna CNPJ, IE, IM, regime tributario, UF, municipio e CNAE da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="PUT" path="/api/v1/fiscal/company-profile" %}
+Cria ou atualiza o perfil fiscal da empresa ativa.
+{% /endpoint %}
+
+## Perfil fiscal do produto
+
+{% endpoint method="GET" path="/api/v1/fiscal/products/:productId/profile" %}
+Retorna NCM, CEST, origem, unidade fiscal, tipo fiscal e classificacoes de ICMS, PIS e COFINS do produto.
+{% /endpoint %}
+
+{% endpoint method="PUT" path="/api/v1/fiscal/products/:productId/profile" %}
+Cria ou atualiza o perfil fiscal do produto. O produto precisa pertencer a empresa ativa.
+
+```json
+{
+  "ncm": "22021000",
+  "cest": "0300700",
+  "origin": "NATIONAL",
+  "fiscalUnit": "UN",
+  "productType": "MERCHANDISE",
+  "icmsCst": "00",
+  "icmsCsosn": "102",
+  "pisCst": "01",
+  "cofinsCst": "01"
+}
+```
+{% /endpoint %}
+
+{% callout title="Produto x regra fiscal" %}
+O produto guarda classificacoes fiscais estaveis, como NCM, CEST, origem, CST/CSOSN de ICMS, CST de PIS e CST de COFINS.
+
+Aliquotas, CFOP, validade e versionamento ficam em `TaxRuleVersion`, porque variam por regime, UF, operacao, periodo e futuras regras tributarias.
+{% /callout %}
+
+## Pendencias fiscais
+
+{% endpoint method="GET" path="/api/v1/fiscal/pending-products" %}
+Lista produtos que precisam de dados fiscais. Suporta `reason`, `limit` e `cursor`.
+{% /endpoint %}
+
+Razoes iniciais:
+
+- `MISSING_PROFILE`
+- `MISSING_NCM`
+- `MISSING_ICMS_CLASSIFICATION`
+- `MISSING_PIS_CST`
+- `MISSING_COFINS_CST`
+- `MISSING_TAX_RULE`
+
+## Regras fiscais
+
+{% endpoint method="GET" path="/api/v1/fiscal/tax-rules" %}
+Lista regras fiscais da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/fiscal/tax-rules" %}
+Cria uma regra fiscal com condicoes.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/fiscal/tax-rules/:id" %}
+Atualiza nome, descricao ou status da regra.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/fiscal/tax-rules/:id/versions" %}
+Cria uma nova versao da regra fiscal. Versoes historicas nao sao sobrescritas.
+{% /endpoint %}
+
+{% callout title="Historico fiscal" tone="warning" %}
+Quando uma regra muda, crie uma nova `TaxRuleVersion`. Isso preserva calculos e auditoria de operacoes antigas.
+{% /callout %}

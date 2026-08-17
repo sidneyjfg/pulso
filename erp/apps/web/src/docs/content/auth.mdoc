@@ -1,0 +1,82 @@
+# Autenticacao
+
+A API separa token de usuario, token administrativo e refresh token. Um token de usuario nao acessa endpoints administrativos globais.
+
+{% endpoint method="POST" path="/api/v1/auth/register" %}
+Cria a primeira estrutura de uma conta SaaS: organizacao, empresa, loja, deposito principal, usuario administrador, permissoes iniciais, sessao e tokens.
+
+Campos sensiveis como `companyId`, `branchId`, `role`, `permissions` e `userId` nao sao aceitos do frontend. A API deriva tudo no backend.
+
+```json
+{
+  "name": "Dono da Loja",
+  "email": "dono@empresa.com.br",
+  "password": "SenhaForte123",
+  "companyName": "Mercado Pulso",
+  "branchName": "Loja Principal"
+}
+```
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/auth/login" %}
+Cria uma sessao e retorna `accessToken`, `refreshToken` e o contexto ativo.
+
+```json
+{
+  "email": "admin@local.test",
+  "password": "ChangeMe123!",
+  "organizationId": "optional",
+  "companyId": "optional",
+  "branchId": "optional"
+}
+```
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/admin/auth/login" %}
+Login administrativo global. Retorna token `ADMIN_ACCESS` com audience administrativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/auth/refresh" %}
+Rotaciona refresh token e emite novo access token.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/me" %}
+Retorna o usuario autenticado, acessos disponiveis e tenant ativo.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/auth/context" %}
+Troca o contexto ativo validando se o usuario possui acesso real a `organizationId`, `companyId` e `branchId`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/auth/logout" %}
+Revoga a sessao atual.
+{% /endpoint %}
+
+## Token de usuario
+
+O access token de usuario possui:
+
+```json
+{
+  "tokenType": "USER_ACCESS",
+  "audience": "erp-user-api",
+  "organizationId": "...",
+  "companyId": "...",
+  "branchId": "...",
+  "permissions": ["product.read"]
+}
+```
+
+## Permissoes
+
+As rotas usam RBAC granular. Exemplos:
+
+- `product.read`
+- `inventory.adjust`
+- `sale.cancel`
+- `purchase.receive`
+- `fiscal.manage`
+
+{% callout title="Fail closed" tone="warning" %}
+Quando a permissao estiver ausente, a API nega a acao antes de consultar ou alterar recursos do dominio.
+{% /callout %}

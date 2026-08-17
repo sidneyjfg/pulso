@@ -1,0 +1,60 @@
+# Vendas e compras
+
+Vendas baixam estoque. Compras so aumentam estoque no recebimento.
+
+## Vendas
+
+{% endpoint method="GET" path="/api/v1/sales" %}
+Lista vendas da loja ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/sales" %}
+Cria venda concluida, pagamentos e movimentos `SALE`.
+
+```json
+{
+  "warehouseId": "...",
+  "source": "MANUAL",
+  "idempotencyKey": "venda-001",
+  "items": [
+    {
+      "productId": "...",
+      "quantity": "2",
+      "unitPrice": "12.00"
+    }
+  ],
+  "payments": [
+    {
+      "method": "PIX",
+      "amount": "24.00"
+    }
+  ]
+}
+```
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/sales/:id/cancel" %}
+Cancela venda sem apagar historico e cria movimentos `CANCEL_SALE`.
+{% /endpoint %}
+
+## Compras
+
+{% endpoint method="GET" path="/api/v1/purchases" %}
+Lista compras da loja ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/purchases" %}
+Cria compra em `DRAFT` ou `ORDERED`. Nao altera estoque.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/purchases/:id/receive" %}
+Recebe compra e gera movimentos `PURCHASE`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/purchases/:id/cancel" %}
+Cancela compra ainda nao recebida.
+{% /endpoint %}
+
+## Idempotencia
+
+Vendas e compras aceitam `idempotencyKey` para evitar duplicidade em retries.

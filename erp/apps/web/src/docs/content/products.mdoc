@@ -1,0 +1,65 @@
+# Produtos
+
+Produto pertence a uma empresa. Estoque nunca fica no produto; o estoque fica em saldos e movimentos por loja/deposito.
+
+{% endpoint method="GET" path="/api/v1/products" %}
+Lista produtos da empresa ativa. Suporta `limit`, `cursor` e `search`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/products" %}
+Cria produto, codigos de barras, precos por loja e estoque inicial opcional.
+
+```json
+{
+  "sku": "COCA-2L",
+  "name": "Coca-Cola 2L",
+  "unit": "UN",
+  "salePrice": "12.00",
+  "barcodes": ["7890000000000"],
+  "initialStock": {
+    "warehouseId": "...",
+    "quantity": "10"
+  }
+}
+```
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/products/:id" %}
+Atualiza campos permitidos explicitamente. A API nao usa mass assignment.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/products/:id/barcodes" %}
+Adiciona ou atualiza codigo de barras do produto.
+{% /endpoint %}
+
+{% endpoint method="PUT" path="/api/v1/products/:id/branch-price" %}
+Define preco especifico por loja.
+{% /endpoint %}
+
+## Categorias
+
+{% endpoint method="GET" path="/api/v1/categories" %}
+Lista categorias da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/categories" %}
+Cria categoria por empresa.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/categories/:id" %}
+Atualiza nome ou status da categoria dentro da empresa ativa.
+{% /endpoint %}
+
+## Campos principais
+
+{% field name="sku" type="string" required=true %}
+Unico por empresa, nao global.
+{% /field %}
+
+{% field name="salePrice" type="decimal" required=true %}
+Valor monetario como decimal. A API nao usa `Float` para dinheiro.
+{% /field %}
+
+{% field name="barcodes" type="string[]" %}
+Permite multiplos EANs por produto.
+{% /field %}

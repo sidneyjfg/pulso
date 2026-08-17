@@ -1,0 +1,53 @@
+# Clientes e fornecedores
+
+Clientes e fornecedores sao cadastros separados. Ambos pertencem a empresa ativa e usam validacao tenant-aware.
+
+## Clientes
+
+{% endpoint method="GET" path="/api/v1/customers" %}
+Lista clientes da empresa ativa. Suporta `search`, `limit` e `cursor`.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/customers/:id" %}
+Retorna cliente por `id + companyId`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/customers" %}
+Cria cliente. `companyId` enviado no payload e ignorado.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/customers/:id" %}
+Atualiza cliente por `id + companyId`.
+{% /endpoint %}
+
+## Fornecedores
+
+{% endpoint method="GET" path="/api/v1/suppliers" %}
+Lista fornecedores da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/suppliers/:id" %}
+Retorna fornecedor por `id + companyId`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/suppliers" %}
+Cria fornecedor separado de cliente.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/suppliers/:id" %}
+Atualiza fornecedor por `id + companyId`.
+{% /endpoint %}
+
+## Campos comuns
+
+{% field name="type" type="INDIVIDUAL | COMPANY" required=true %}
+Pessoa fisica ou juridica.
+{% /field %}
+
+{% field name="document" type="string" %}
+CPF ou CNPJ somente com numeros.
+{% /field %}
+
+{% field name="notes" type="string" %}
+Campo opcional para observacoes internas.
+{% /field %}

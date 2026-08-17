@@ -1,0 +1,34 @@
+# Dashboard
+
+O dashboard retorna dados acionaveis da loja ativa. Ele nao carrega datasets grandes no frontend.
+
+{% endpoint method="GET" path="/api/v1/dashboard" %}
+Retorna vendas de hoje, pedidos, produtos acabando, produtos sem estoque, compras em aberto, itens de atencao e ultimas vendas.
+{% /endpoint %}
+
+## Permissoes
+
+Requer:
+
+- `sale.read`
+- `inventory.read`
+
+## Resposta
+
+```json
+{
+  "today": {
+    "salesTotal": "4238.00",
+    "orders": 38,
+    "lowStockProducts": 7,
+    "outOfStockProducts": 2,
+    "pendingPurchases": 3
+  },
+  "attention": [],
+  "recentSales": []
+}
+```
+
+{% callout title="Escopo" %}
+Todas as metricas usam `companyId` e `branchId` do token. Parametros enviados na URL nao trocam o tenant.
+{% /callout %}

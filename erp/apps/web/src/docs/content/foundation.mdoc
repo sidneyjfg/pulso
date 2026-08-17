@@ -1,0 +1,71 @@
+# Empresas e usuarios
+
+Essas rotas administram a estrutura do tenant ativo: empresas, lojas, depositos, papeis e usuarios.
+
+## Empresas
+
+{% endpoint method="GET" path="/api/v1/companies" %}
+Lista empresas da organization ativa acessiveis ao usuario.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/companies" %}
+Cria empresa legal dentro da organization ativa.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/companies/:id" %}
+Atualiza empresa validando `id + organizationId` e permissao.
+{% /endpoint %}
+
+## Lojas
+
+{% endpoint method="GET" path="/api/v1/branches" %}
+Lista lojas da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/branches" %}
+Cria loja na empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/branches/:id" %}
+Atualiza loja por `id + companyId`.
+{% /endpoint %}
+
+## Depositos
+
+{% endpoint method="GET" path="/api/v1/warehouses" %}
+Lista depositos da loja ativa ou da loja informada, quando permitido.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/warehouses" %}
+Cria deposito para uma loja da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/warehouses/:id" %}
+Atualiza nome ou status do deposito.
+{% /endpoint %}
+
+## Papeis e usuarios
+
+{% endpoint method="GET" path="/api/v1/roles" %}
+Lista papeis da empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/roles" %}
+Cria papel com permissoes granulares. `platform.admin` nao pode ser atribuido por esta rota.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/users" %}
+Lista usuarios com acesso a empresa ativa.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/users" %}
+Cria usuario com role e lojas permitidas.
+{% /endpoint %}
+
+{% endpoint method="PATCH" path="/api/v1/users/:id/status" %}
+Ativa ou inativa usuario. Alteracao gera auditoria.
+{% /endpoint %}
+
+{% callout title="Permissoes" tone="warning" %}
+Alteracoes em usuarios, papeis e acessos devem ser tratadas como operacoes sensiveis e auditadas.
+{% /callout %}

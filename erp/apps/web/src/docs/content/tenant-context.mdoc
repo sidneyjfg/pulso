@@ -1,0 +1,52 @@
+# Multiempresa e multiloja
+
+O ERP nasce como SaaS multiempresa e multiloja. A hierarquia principal e:
+
+```text
+Organization
+  Company
+    Branch
+      Warehouse
+```
+
+## Contexto ativo
+
+Toda request autenticada possui `TenantContext`:
+
+```json
+{
+  "userId": "...",
+  "organizationId": "...",
+  "companyId": "...",
+  "branchId": "...",
+  "role": "Admin",
+  "permissions": []
+}
+```
+
+## Regra de isolamento
+
+Consultas de entidades multi-tenant usam o tenant autenticado. Exemplo conceitual:
+
+```ts
+where: {
+  id: requestedId,
+  companyId: tenant.companyId
+}
+```
+
+Para recursos de loja, tambem entra `branchId`.
+
+{% callout title="Nunca confiar no frontend" tone="danger" %}
+O frontend pode exibir empresa e loja, mas o backend nunca aceita `companyId`, `branchId`, `userId`, `role` ou `permissions` vindos do payload.
+{% /callout %}
+
+## Entidades base
+
+| Entidade | Papel |
+| --- | --- |
+| `Organization` | Conta SaaS do cliente |
+| `Company` | Empresa legal, CNPJ e parametros fiscais |
+| `Branch` | Loja ou filial |
+| `Warehouse` | Deposito de uma loja |
+| `AuditLog` | Historico de alteracoes sensiveis |

@@ -1,0 +1,37 @@
+{
+  "name": "erp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "corepack pnpm --parallel --filter @erp/web --filter @erp/api --filter @erp/worker dev",
+    "dev:web": "corepack pnpm --filter @erp/web dev",
+    "dev:api": "corepack pnpm --filter @erp/api dev",
+    "dev:worker": "corepack pnpm --filter @erp/worker dev",
+    "dev:infra": "node scripts/docker-compose.mjs up -d redis",
+    "dev:infra:down": "node scripts/docker-compose.mjs down",
+    "setup:local": "node scripts/setup-local.mjs",
+    "db:generate": "corepack pnpm --filter @erp/database db:generate",
+    "db:migrate": "corepack pnpm --filter @erp/database db:migrate",
+    "db:seed": "corepack pnpm --filter @erp/database db:seed",
+    "db:studio": "corepack pnpm --filter @erp/database db:studio",
+    "lint": "corepack pnpm -r lint",
+    "typecheck": "corepack pnpm -r typecheck",
+    "test": "corepack pnpm -r test",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test",
+    "test:security": "vitest run --config vitest.security.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2",
+    "@eslint/js": "^9.22.0",
+    "@types/node": "^22.13.14",
+    "eslint": "^9.22.0",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.26.1",
+    "vitest": "^3.0.9"
+  }
+}

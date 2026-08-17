@@ -1,0 +1,27 @@
+CREATE TABLE `UserPreference` (
+  `id` VARCHAR(191) NOT NULL,
+  `userId` VARCHAR(191) NOT NULL,
+  `companyId` VARCHAR(191) NOT NULL,
+  `branchId` VARCHAR(191) NOT NULL,
+  `darkMode` BOOLEAN NOT NULL DEFAULT false,
+  `compactMenu` BOOLEAN NOT NULL DEFAULT true,
+  `showSavings` BOOLEAN NOT NULL DEFAULT true,
+  `confirmCriticalActions` BOOLEAN NOT NULL DEFAULT true,
+  `sessionWarnings` BOOLEAN NOT NULL DEFAULT true,
+  `hideSensitiveData` BOOLEAN NOT NULL DEFAULT false,
+  `blockNegativeStock` BOOLEAN NOT NULL DEFAULT true,
+  `lowStockAlerts` BOOLEAN NOT NULL DEFAULT true,
+  `currentBranchOnly` BOOLEAN NOT NULL DEFAULT true,
+  `showFiscalPending` BOOLEAN NOT NULL DEFAULT true,
+  `prepareChannelSync` BOOLEAN NOT NULL DEFAULT true,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL,
+
+  PRIMARY KEY (`id`),
+  UNIQUE INDEX `UserPreference_userId_companyId_branchId_key` (`userId`, `companyId`, `branchId`),
+  INDEX `UserPreference_companyId_branchId_idx` (`companyId`, `branchId`),
+  INDEX `UserPreference_userId_idx` (`userId`),
+  CONSTRAINT `UserPreference_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `User`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `UserPreference_companyId_fkey` FOREIGN KEY (`companyId`) REFERENCES `Company`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `UserPreference_branchId_fkey` FOREIGN KEY (`branchId`) REFERENCES `Branch`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

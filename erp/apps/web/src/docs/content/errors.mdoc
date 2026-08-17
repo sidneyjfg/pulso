@@ -1,0 +1,45 @@
+# Erros
+
+A API nao expoe stack trace, SQL, erro interno do Prisma ou caminho do filesystem para o usuario.
+
+## Formato
+
+```json
+{
+  "code": "PRODUCT_NOT_FOUND",
+  "message": "Produto nao encontrado."
+}
+```
+
+## Validacao
+
+Quando o Zod rejeita o payload:
+
+```json
+{
+  "code": "VALIDATION_ERROR",
+  "message": "Revise os campos informados.",
+  "issues": [
+    {
+      "path": "salePrice",
+      "message": "Informe um valor valido."
+    }
+  ]
+}
+```
+
+## Codigos comuns
+
+| Codigo | HTTP | Significado |
+| --- | --- | --- |
+| `UNAUTHORIZED` | 401 | Token ausente ou invalido |
+| `INVALID_TOKEN_TYPE` | 401 | Token correto para outro tipo de API |
+| `FORBIDDEN` | 403 | Permissao ausente |
+| `INVALID_TENANT` | 403 | Usuario sem acesso ao contexto |
+| `PRODUCT_NOT_FOUND` | 404 | Produto nao encontrado no tenant |
+| `INSUFFICIENT_STOCK` | 409 | Estoque insuficiente |
+| `CONFLICT` | 409 | Registro duplicado ou estado invalido |
+
+{% callout title="Seguranca" tone="danger" %}
+Trate mensagens de erro como resposta para usuarios finais. Logs internos usam redaction para nao registrar senhas, tokens, cookies ou segredos.
+{% /callout %}

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "baseUrl": ".",
+    "paths": {
+      "@erp/config": ["packages/config/src/index.ts"],
+      "@erp/contracts": ["packages/contracts/src/index.ts"],
+      "@erp/database": ["packages/database/src/index.ts"],
+      "@erp/fiscal": ["packages/fiscal/src/index.ts"],
+      "@erp/integrations": ["packages/integrations/src/index.ts"],
+      "@erp/security": ["packages/security/src/index.ts"],
+      "@erp/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}
