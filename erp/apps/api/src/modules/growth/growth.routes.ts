@@ -4,6 +4,7 @@ import {
   createAlertRuleBodySchema,
   createImportJobBodySchema,
   createIntegrationConnectionBodySchema,
+  connectIfoodIntegrationBodySchema,
   createReportJobBodySchema,
   listQuerySchema,
   updateAlertRuleBodySchema,
@@ -12,6 +13,7 @@ import {
 import { Prisma, prisma } from "@erp/database";
 import { assertPermission, errors } from "@erp/security";
 import { parseBody, parseParams, parseQuery } from "../../lib/zod.js";
+import { healthCheckIfoodMerchant } from "./ifood.service.js";
 
 const idParamsSchema = z.object({ id: z.string().cuid() });
 
@@ -275,6 +277,84 @@ export async function growthRoutes(app: FastifyInstance) {
 
     await audit(request, { action: "integration_connection.update", entityType: "IntegrationConnection", entityId: connection.id, before, after: connection });
     return connection;
+  });
+
+  app.post("/api/v1/integrations/connections/:id/ifood/connect", { preHandler: [app.authenticateUser] }, async (request) => {
+    assertPermission(request.tenant!, "integration.manage");
+    const params = parseParams(idParamsSchema, request);
+    const body = parseBody(connectIfoodIntegrationBodySchema, request);
+    const before = await prisma.integrationConnection.findFirst({
+      where: { id: params.id, companyId: request.tenant!.companyId },
+      select: { id: true, channel: true, status: true, externalAccountId: true }
+    });
+
+    if (!before) {
+      throw errors.notFound("INTEGRATION_CONNECTION_NOT_FOUND", "Conexão não encontrada.");
+    }
+
+    if (before.channel !== "IFOOD") {
+      throw errors.conflict("INVALID_INTEGRATION_CHANNEL", "Esta conexão não é do canal iFood.");
+    }
+
+    const health = await healthCheckIfoodMerchant(body.merchantId);
+    const connection = await prisma.integrationConnection.update({
+      where: { id: before.id },
+      data: {
+        status: "CONNECTED",
+        externalAccountId: body.merchantId,
+        connectedAt: new Date(),
+        lastSyncAt: new Date()
+      },
+      select: { id: true, channel: true, status: true, externalAccountId: true, connectedAt: true, lastSyncAt: true, updatedAt: true }
+    });
+
+    await audit(request, {
+      action: "integration_connection.ifood_connect",
+      entityType: "IntegrationConnection",
+      entityId: connection.id,
+      before,
+      after: { ...connection, mode: body.mode, merchant: health.merchant }
+    });
+
+    return {
+      ...connection,
+      mode: body.mode,
+      merchant: health.merchant
+    };
+  });
+
+  app.get("/api/v1/integrations/connections/:id/ifood/health", { preHandler: [app.authenticateUser] }, async (request) => {
+    assertPermission(request.tenant!, "integration.read");
+    const params = parseParams(idParamsSchema, request);
+    const connection = await prisma.integrationConnection.findFirst({
+      where: { id: params.id, companyId: request.tenant!.companyId },
+      select: { id: true, channel: true, status: true, externalAccountId: true, connectedAt: true, lastSyncAt: true }
+    });
+
+    if (!connection) {
+      throw errors.notFound("INTEGRATION_CONNECTION_NOT_FOUND", "Conexão não encontrada.");
+    }
+
+    if (connection.channel !== "IFOOD") {
+      throw errors.conflict("INVALID_INTEGRATION_CHANNEL", "Esta conexão não é do canal iFood.");
+    }
+
+    if (!connection.externalAccountId) {
+      throw errors.conflict("IFOOD_MERCHANT_NOT_CONFIGURED", "Defina o merchant iFood antes de testar a saúde da conexão.");
+    }
+
+    const health = await healthCheckIfoodMerchant(connection.externalAccountId);
+    const updated = await prisma.integrationConnection.update({
+      where: { id: connection.id },
+      data: { lastSyncAt: new Date() },
+      select: { id: true, channel: true, status: true, externalAccountId: true, connectedAt: true, lastSyncAt: true, updatedAt: true }
+    });
+
+    return {
+      status: "healthy",
+      merchant: health.merchant,
+      connection: updated
+    };
   });
 
   app.get("/api/v1/reports/jobs", { preHandler: [app.authenticateUser] }, async (request) => {

@@ -21,6 +21,10 @@ const prismaMock = vi.hoisted(() => ({
     findUnique: vi.fn(),
     upsert: vi.fn()
   },
+  companyPricingSetting: {
+    findUnique: vi.fn(),
+    upsert: vi.fn()
+  },
   product: {
     findFirst: vi.fn(),
     findMany: vi.fn(),
@@ -133,6 +137,58 @@ describe("fiscal security", () => {
 
     expect(response.statusCode).toBe(403);
     expect(prismaMock.companyFiscalProfile.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("denies pricing settings update without fiscal.manage permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/v1/fiscal/pricing-settings",
+      headers: { authorization: `Bearer ${await userToken(["fiscal.read"])}` },
+      payload: {
+        taxPercent: 9.5,
+        feePercent: 2.4
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.companyPricingSetting.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("stores pricing settings scoped by authenticated tenant company", async () => {
+    prismaMock.companyPricingSetting.findUnique.mockResolvedValue(null);
+    prismaMock.companyPricingSetting.upsert.mockResolvedValue({
+      id: "pricing_1",
+      companyId: "company_1",
+      taxPercent: new DecimalMock(8.75),
+      feePercent: new DecimalMock(2.1),
+      updatedAt: new Date()
+    });
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/v1/fiscal/pricing-settings",
+      headers: { authorization: `Bearer ${await userToken(["fiscal.manage"])}` },
+      payload: {
+        companyId: "company_evil",
+        taxPercent: 8.75,
+        feePercent: 2.1
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(prismaMock.companyPricingSetting.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { companyId: "company_1" },
+        create: expect.objectContaining({ companyId: "company_1" })
+      })
+    );
     await app.close();
   });
 

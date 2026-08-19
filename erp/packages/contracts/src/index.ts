@@ -411,6 +411,11 @@ export const updateIntegrationConnectionBodySchema = z.object({
   externalAccountId: z.string().trim().min(1).max(180).nullable().optional()
 });
 
+export const connectIfoodIntegrationBodySchema = z.object({
+  merchantId: z.string().uuid(),
+  mode: z.enum(["GROCERIES", "RESTAURANT_PDV"]).default("GROCERIES")
+});
+
 export const createReportJobBodySchema = z.object({
   type: z.enum(["SALES", "INVENTORY", "PURCHASES", "FISCAL", "CUSTOM"]),
   branchId: idSchema.optional(),
@@ -455,6 +460,11 @@ export const createTaxRuleVersionBodySchema = z.object({
   (value) => !value.validUntil || value.validUntil > value.validFrom,
   "A data final precisa ser posterior à data inicial."
 );
+
+export const upsertPricingSettingsBodySchema = z.object({
+  taxPercent: z.coerce.number().min(0).max(100),
+  feePercent: z.coerce.number().min(0).max(100)
+});
 
 export type LoginBody = z.infer<typeof loginBodySchema>;
 export type RegisterBody = z.infer<typeof registerBodySchema>;
@@ -502,7 +512,9 @@ export type UpdateAlertRuleBody = z.infer<typeof updateAlertRuleBodySchema>;
 export type CreateImportJobBody = z.infer<typeof createImportJobBodySchema>;
 export type CreateIntegrationConnectionBody = z.infer<typeof createIntegrationConnectionBodySchema>;
 export type UpdateIntegrationConnectionBody = z.infer<typeof updateIntegrationConnectionBodySchema>;
+export type ConnectIfoodIntegrationBody = z.infer<typeof connectIfoodIntegrationBodySchema>;
 export type CreateReportJobBody = z.infer<typeof createReportJobBodySchema>;
 export type CreateTaxRuleBody = z.infer<typeof createTaxRuleBodySchema>;
 export type UpdateTaxRuleBody = z.infer<typeof updateTaxRuleBodySchema>;
 export type CreateTaxRuleVersionBody = z.infer<typeof createTaxRuleVersionBodySchema>;
+export type UpsertPricingSettingsBody = z.infer<typeof upsertPricingSettingsBodySchema>;

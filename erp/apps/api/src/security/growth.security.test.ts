@@ -201,6 +201,31 @@ describe("growth foundation security", () => {
     await app.close();
   });
 
+  it("denies ifood connect without manage permission", async () => {
+    prismaMock.integrationConnection.findFirst.mockResolvedValue({
+      id: "connection_1",
+      channel: "IFOOD",
+      status: "DISCONNECTED",
+      externalAccountId: null
+    });
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+    const token = await userToken(["integration.read"]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/integrations/connections/cjld2cjxh0000qzrmn831i7rn/ifood/connect",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        merchantId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+        mode: "GROCERIES"
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    await app.close();
+  });
+
   it("bounds global search and filters every source by tenant", async () => {
     prismaMock.product.findMany.mockResolvedValue([]);
     prismaMock.customer.findMany.mockResolvedValue([]);

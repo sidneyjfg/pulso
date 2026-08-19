@@ -15,9 +15,11 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   Check,
   ClipboardCheck,
   CreditCard,
+  Eye,
   FileText,
   Gauge,
   Layers3,
@@ -48,14 +50,27 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import {
+  createAlertRule,
   createCategory,
   createBranch,
+  createProduct,
+  createImportJob,
+  createIntegrationConnection,
+  createInventoryCount,
+  createPurchase,
+  createReportJob,
+  createSale,
+  createStockTransfer,
+  createTaxRule,
+  createUser,
+  createWarehouse,
   getBranches,
   getCategories,
   getDashboard,
   getCustomers,
   getMe,
   getPaginatedResource,
+  getPricingSettings,
   getProducts,
   getRoles,
   getSuppliers,
@@ -66,6 +81,8 @@ import {
   logoutSession,
   register,
   refreshSession,
+  upsertProductFiscalProfile,
+  updatePricingSettings,
   updateCategoryActive,
   updateProductActive,
   switchContext,
@@ -80,6 +97,7 @@ import {
   type LoginResponse,
   type MeResponse,
   type PersonListResponse,
+  type PricingSettingsResponse,
   type ProductListResponse,
   type RegisterBody,
   type RoleListResponse,
@@ -1006,12 +1024,15 @@ type DashboardTab =
   | "categories"
   | "sales"
   | "payments"
+  | "receivables"
+  | "payables"
   | "purchases"
   | "transfers"
   | "counts"
   | "fiscal"
   | "imports"
   | "integrations"
+  | "channels"
   | "reports"
   | "users"
   | "settings"
@@ -1042,8 +1063,23 @@ type ConfirmAction = {
   onConfirm: () => void | Promise<void>;
 };
 
+type DetailsDialogState = {
+  title: string;
+  data: unknown;
+  variant?: "product";
+};
+
 type ProductItem = ProductListResponse["data"][number];
 type UserItem = UserListResponse["data"][number];
+type ProductFiscalProfileInput = {
+  ncm?: string;
+  cest?: string;
+  fiscalUnit?: string;
+  icmsCst?: string;
+  icmsCsosn?: string;
+  pisCst?: string;
+  cofinsCst?: string;
+};
 
 type SettingsState = {
   darkMode: boolean;
@@ -1057,6 +1093,16 @@ type SettingsState = {
   currentBranchOnly: boolean;
   showFiscalPending: boolean;
   prepareChannelSync: boolean;
+};
+
+type PricingConfig = {
+  taxPercent: number;
+  feePercent: number;
+};
+
+const defaultPricingConfig: PricingConfig = {
+  taxPercent: 6,
+  feePercent: 3
 };
 
 type OperationalTab = Exclude<DashboardTab, "overview" | "products" | "inventory" | "customers" | "suppliers" | "categories">;
@@ -1080,6 +1126,8 @@ const tabRoutes: Record<DashboardTab, string> = {
   "global-search": "/app/busca",
   sales: "/app/vendas",
   payments: "/app/pagamentos",
+  receivables: "/app/contas-a-receber",
+  payables: "/app/contas-a-pagar",
   purchases: "/app/compras",
   multistore: "/app/multiloja",
   products: "/app/produtos",
@@ -1093,6 +1141,7 @@ const tabRoutes: Record<DashboardTab, string> = {
   fiscal: "/app/fiscal",
   imports: "/app/migracao",
   integrations: "/app/integracoes",
+  channels: "/app/canais",
   reports: "/app/relatorios",
   users: "/app/usuarios"
 };
@@ -1115,11 +1164,11 @@ type PricingAnalysis = {
   status: "good" | "attention" | "bad" | "unknown";
 };
 
-function analyzePricing(product: ProductItem): PricingAnalysis {
+function analyzePricing(product: ProductItem, pricingConfig: PricingConfig): PricingAnalysis {
   const salePrice = Number(product.branchPrices[0]?.salePrice ?? product.salePrice);
   const costPrice = Number(product.costPrice ?? 0);
-  const taxPercent = 6;
-  const feePercent = 3;
+  const taxPercent = pricingConfig.taxPercent;
+  const feePercent = pricingConfig.feePercent;
   const variableCosts = salePrice * ((taxPercent + feePercent) / 100);
   const netProfit = salePrice - costPrice - variableCosts;
   const netMargin = salePrice > 0 ? (netProfit / salePrice) * 100 : 0;
@@ -1140,34 +1189,67 @@ function analyzePricing(product: ProductItem): PricingAnalysis {
 }
 
 function SystemAlert({ alert, onDismiss }: { alert: AppAlert; onDismiss: () => void }) {
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    setIsVisible(false);
+    const frame = window.requestAnimationFrame(() => setIsVisible(true));
+    const timeout = window.setTimeout(() => {
+      setIsVisible(false);
+      window.setTimeout(onDismiss, 180);
+    }, 5200);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [alert, onDismiss]);
+
   const toneClass = {
-    info: "border-emerald-200 bg-emerald-50 text-emerald-950",
-    warning: "border-amber-200 bg-amber-50 text-amber-950",
-    success: "border-emerald-200 bg-white text-slate-950"
+    info: "border-slate-200 bg-white text-slate-900",
+    warning: "border-amber-200 bg-white text-slate-900",
+    success: "border-emerald-200 bg-white text-slate-900"
   }[alert.tone];
 
   const iconClass = {
-    info: "text-emerald-700",
-    warning: "text-amber-600",
-    success: "text-emerald-700"
+    info: "bg-slate-100 text-slate-700",
+    warning: "bg-amber-100 text-amber-700",
+    success: "bg-emerald-100 text-emerald-700"
   }[alert.tone];
 
+  const Icon = alert.tone === "success" ? Check : alert.tone === "warning" ? AlertTriangle : Bell;
+
   return (
-    <aside className={`mb-4 flex gap-3 rounded-lg border px-4 py-3 shadow-sm ${toneClass}`} role="status" aria-live="polite">
-      <AlertTriangle aria-hidden="true" size={18} className={`mt-0.5 shrink-0 ${iconClass}`} />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">{alert.title}</p>
-        <p className="mt-1 text-sm leading-6 opacity-80">{alert.description}</p>
-      </div>
-      <button
-        type="button"
-        onClick={onDismiss}
-        aria-label="Fechar alerta"
-        className="self-start rounded-md p-1 opacity-70 transition-[transform,background-color,opacity] duration-150 ease-[var(--ease-out)] hover:bg-white/60 hover:opacity-100 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+    <div className="pointer-events-none fixed right-4 top-4 z-[90] w-[min(92vw,420px)]">
+      <aside
+        className={`pointer-events-auto rounded-xl border p-4 shadow-xl shadow-slate-950/10 transition-all duration-200 ease-out ${toneClass} ${
+          isVisible ? "translate-y-0 opacity-100" : "-translate-y-2 opacity-0"
+        }`}
+        role="status"
+        aria-live="polite"
       >
-        <X aria-hidden="true" size={16} />
-      </button>
-    </aside>
+        <div className="flex gap-3">
+          <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${iconClass}`}>
+            <Icon aria-hidden="true" size={15} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">{alert.title}</p>
+            <p className="mt-1 text-sm leading-6 text-slate-600">{alert.description}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setIsVisible(false);
+              window.setTimeout(onDismiss, 180);
+            }}
+            aria-label="Fechar alerta"
+            className="self-start rounded-md p-1 text-slate-500 transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-slate-100 hover:text-slate-900 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -1214,12 +1296,20 @@ function ConfirmDialog({ action, onClose }: { action: ConfirmAction | null; onCl
   );
 }
 
-function PricingInsightDialog({ product, onClose }: { product: ProductItem | null; onClose: () => void }) {
+function PricingInsightDialog({
+  product,
+  pricingConfig,
+  onClose
+}: {
+  product: ProductItem | null;
+  pricingConfig: PricingConfig;
+  onClose: () => void;
+}) {
   if (!product) {
     return null;
   }
 
-  const analysis = analyzePricing(product);
+  const analysis = analyzePricing(product, pricingConfig);
   const statusContent = {
     good: {
       title: "Preço saudável",
@@ -1297,6 +1387,165 @@ function PricingInsightDialog({ product, onClose }: { product: ProductItem | nul
   );
 }
 
+function DetailsDialog({
+  details,
+  pricingConfig,
+  onClose
+}: {
+  details: DetailsDialogState | null;
+  pricingConfig: PricingConfig;
+  onClose: () => void;
+}) {
+  if (!details) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="details-title">
+      <div className="auth-card-enter w-full max-w-3xl overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Detalhes</p>
+            <h2 id="details-title" className="mt-1 text-lg font-semibold text-slate-950">{details.title}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar detalhes">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+        <div className="max-h-[70vh] overflow-y-auto p-5">
+          {details.variant === "product" && isProductDetailsData(details.data) ? (
+            <ProductDetailsContent product={details.data} pricingConfig={pricingConfig} />
+          ) : (
+            <pre className="overflow-x-auto rounded-md border border-border bg-slate-50 p-4 text-xs text-slate-700">{JSON.stringify(details.data, null, 2)}</pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProductDetailsContent({ product, pricingConfig }: { product: ProductItem; pricingConfig: PricingConfig }) {
+  const displaySalePrice = product.branchPrices[0]?.salePrice ?? product.salePrice;
+  const analysis = analyzePricing(product, pricingConfig);
+  const [showMetrics, setShowMetrics] = useState(false);
+  const metricsPopoverRef = useRef<HTMLElement | null>(null);
+  const metricsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const marginPercent = analysis.netMargin.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const markupPercent = analysis.markup.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+  useEffect(() => {
+    if (!showMetrics) {
+      return;
+    }
+
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+      if (metricsPopoverRef.current?.contains(target) || metricsButtonRef.current?.contains(target)) {
+        return;
+      }
+      setShowMetrics(false);
+    };
+
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [showMetrics]);
+
+  return (
+    <div className="relative space-y-5">
+      <div className="flex justify-end">
+        <button
+          ref={metricsButtonRef}
+          type="button"
+          title={showMetrics ? "Ocultar análise de precificação" : "Ver análise de precificação"}
+          aria-label={showMetrics ? "Ocultar análise de precificação" : "Ver análise de precificação"}
+          onClick={() => setShowMetrics((current) => !current)}
+          className="inline-flex items-center justify-center p-0 text-slate-500 transition-[transform,color] duration-150 ease-[var(--ease-out)] hover:text-emerald-700 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+        >
+          <CircleHelp aria-hidden="true" size={17} />
+        </button>
+      </div>
+      {showMetrics ? (
+        <aside ref={metricsPopoverRef} className="absolute right-0 top-7 z-10 w-[min(92vw,460px)] rounded-xl border border-border bg-white p-4 shadow-2xl shadow-slate-950/15">
+          <p className="text-sm font-semibold text-slate-950">Análise de precificação</p>
+          <p className="mt-1 text-sm text-slate-600">
+            {analysis.status === "unknown"
+              ? "Preencha custo e preço para calcular margem e lucro."
+              : `Margem ${marginPercent}% = margem líquida estimada após custo, impostos e taxas. Não é percentual de imposto.`}
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {[
+              ["Preço de venda", money(analysis.salePrice)],
+              ["Custo informado", analysis.costPrice ? money(analysis.costPrice) : "Sem custo"],
+              [`Impostos (${analysis.taxPercent}%)`, money(analysis.salePrice * (analysis.taxPercent / 100))],
+              [`Taxas (${analysis.feePercent}%)`, money(analysis.salePrice * (analysis.feePercent / 100))],
+              ["Lucro líquido", analysis.status === "unknown" ? "Sem cálculo" : money(analysis.netProfit)],
+              ["Markup", analysis.status === "unknown" ? "Sem cálculo" : `${markupPercent}%`]
+            ].map(([label, value]) => (
+              <article key={label} className="rounded-md border border-border bg-slate-50 p-2.5">
+                <p className="text-xs text-muted-foreground">{label}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-950">{value}</p>
+              </article>
+            ))}
+          </div>
+        </aside>
+      ) : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[
+          ["SKU", product.sku],
+          ["Categoria", product.category?.name ?? "Sem categoria"],
+          ["Unidade", product.unit],
+          ["Preço de venda", money(displaySalePrice)],
+          ["Preço base", money(product.salePrice)],
+          ["Custo", product.costPrice ? money(product.costPrice) : "Sem custo"],
+          ["Status", product.active ? "Ativo" : "Inativo"],
+          ["ID", product.id]
+        ].map(([label, value]) => (
+          <article key={label} className="rounded-lg border border-border bg-slate-50 p-3">
+            <p className="text-xs text-muted-foreground">{label}</p>
+            <p className="mt-1 text-sm font-medium text-slate-950">{value}</p>
+          </article>
+        ))}
+      </div>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">Códigos de barras</h3>
+        {product.barcodes.length > 0 ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {product.barcodes.map((barcode) => (
+              <article key={barcode.id} className="rounded-md border border-border bg-white px-3 py-2">
+                <p className="text-xs text-muted-foreground">EAN</p>
+                <p className="mt-1 font-mono text-sm text-slate-950">{barcode.barcode}</p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">Nenhum código de barras cadastrado.</p>
+        )}
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">Preços por loja</h3>
+        {product.branchPrices.length > 0 ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {product.branchPrices.map((branchPrice, index) => (
+              <article key={`${product.id}-price-${index}`} className="rounded-md border border-border bg-white px-3 py-2">
+                <p className="text-xs text-muted-foreground">Loja {index + 1}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-950">{money(branchPrice.salePrice)}</p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">Nenhum preço por loja cadastrado.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function PaginationBar({
   page,
   limit,
@@ -1368,7 +1617,8 @@ function PeopleDirectorySection({
   onLimitChange,
   page,
   onPrevious,
-  onNext
+  onNext,
+  onViewDetails
 }: {
   title: string;
   description: string;
@@ -1387,6 +1637,7 @@ function PeopleDirectorySection({
   page: number;
   onPrevious: () => void;
   onNext: () => void;
+  onViewDetails: (person: PersonListResponse["data"][number]) => void;
 }) {
   return (
     <section className="rounded-lg border border-border bg-white">
@@ -1431,7 +1682,7 @@ function PeopleDirectorySection({
       <div className="divide-y divide-border">
         {query.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando...</p> : null}
         {query.data?.data.map((person) => (
-          <article key={person.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_150px_190px_130px] lg:items-center">
+          <article key={person.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_150px_190px_220px] lg:items-center">
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-2">
                 <h3 className="truncate text-sm font-medium">{person.name}</h3>
@@ -1446,7 +1697,18 @@ function PeopleDirectorySection({
               <p className="truncate">{person.email ?? "Sem e-mail"}</p>
               <p className="truncate">{person.phone ?? "Sem telefone"}</p>
             </div>
-            <p className="text-sm text-muted-foreground">{new Date(person.createdAt).toLocaleDateString("pt-BR")}</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">{new Date(person.createdAt).toLocaleDateString("pt-BR")}</p>
+              <button
+                type="button"
+                onClick={() => onViewDetails(person)}
+                title="Ver detalhes"
+                aria-label="Ver detalhes"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                <Eye aria-hidden="true" size={14} />
+              </button>
+            </div>
           </article>
         ))}
         {query.data?.data.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">{emptyMessage}</p> : null}
@@ -1613,6 +1875,410 @@ function CategorySection({
   );
 }
 
+function ProductCreateDialog({
+  open,
+  categories,
+  warehouses,
+  canManageFiscalProfile,
+  isSaving,
+  isCreatingCategory,
+  onClose,
+  onCreateCategory,
+  onSave
+}: {
+  open: boolean;
+  categories: CategoryListResponse["data"];
+  warehouses: Array<{ id: string; name: string }>;
+  canManageFiscalProfile: boolean;
+  isSaving: boolean;
+  isCreatingCategory: boolean;
+  onClose: () => void;
+  onCreateCategory: (name: string) => Promise<{ id: string; name: string; active: boolean }>;
+  onSave: (input: {
+    sku: string;
+    name: string;
+    unit: string;
+    salePrice: string;
+    costPrice?: string;
+    categoryId?: string;
+    barcodes: string[];
+    initialStock?: { warehouseId: string; quantity: string };
+    fiscalProfile?: ProductFiscalProfileInput;
+  }) => void;
+}) {
+  const [sku, setSku] = useState("");
+  const [name, setName] = useState("");
+  const [unit, setUnit] = useState("UN");
+  const [salePrice, setSalePrice] = useState("");
+  const [costPrice, setCostPrice] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [createdCategories, setCreatedCategories] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
+  const [barcode, setBarcode] = useState("");
+  const [initialQuantity, setInitialQuantity] = useState("");
+  const [initialWarehouseId, setInitialWarehouseId] = useState("");
+  const [ncm, setNcm] = useState("");
+  const [cest, setCest] = useState("");
+  const [fiscalUnit, setFiscalUnit] = useState("UN");
+  const [icmsCst, setIcmsCst] = useState("");
+  const [icmsCsosn, setIcmsCsosn] = useState("");
+  const [pisCst, setPisCst] = useState("");
+  const [cofinsCst, setCofinsCst] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setInitialWarehouseId((current) => current || warehouses[0]?.id || "");
+  }, [open, warehouses]);
+
+  const categoryOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string }>();
+
+    for (const category of categories) {
+      map.set(category.id, { id: category.id, name: category.name });
+    }
+
+    for (const category of createdCategories) {
+      map.set(category.id, { id: category.id, name: category.name });
+    }
+
+    return Array.from(map.values()).sort((left, right) => left.name.localeCompare(right.name, "pt-BR"));
+  }, [categories, createdCategories]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-product-title">
+      <div className="auth-card-enter w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Cadastro</p>
+            <h2 id="create-product-title" className="mt-1 text-lg font-semibold text-slate-950">Novo produto</h2>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar cadastro de produto">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+
+        <form
+          className="grid gap-4 p-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave({
+              sku: sku.trim(),
+              name: name.trim(),
+              unit: unit.trim() || "UN",
+              salePrice: salePrice.trim(),
+              ...(costPrice.trim() ? { costPrice: costPrice.trim() } : {}),
+              ...(categoryId ? { categoryId } : {}),
+              barcodes: barcode.trim() ? [barcode.trim()] : [],
+              ...(initialQuantity.trim() && initialWarehouseId
+                ? {
+                    initialStock: {
+                      warehouseId: initialWarehouseId,
+                      quantity: initialQuantity.trim()
+                    }
+                  }
+                : {}),
+              ...(canManageFiscalProfile &&
+              (ncm.trim() ||
+                cest.trim() ||
+                icmsCst.trim() ||
+                icmsCsosn.trim() ||
+                pisCst.trim() ||
+                cofinsCst.trim() ||
+                fiscalUnit.trim().toUpperCase() !== "UN")
+                ? {
+                    fiscalProfile: {
+                      ...(ncm.trim() ? { ncm: ncm.trim() } : {}),
+                      ...(cest.trim() ? { cest: cest.trim() } : {}),
+                      ...(fiscalUnit.trim() ? { fiscalUnit: fiscalUnit.trim().toUpperCase() } : {}),
+                      ...(icmsCst.trim() ? { icmsCst: icmsCst.trim() } : {}),
+                      ...(icmsCsosn.trim() ? { icmsCsosn: icmsCsosn.trim() } : {}),
+                      ...(pisCst.trim() ? { pisCst: pisCst.trim() } : {}),
+                      ...(cofinsCst.trim() ? { cofinsCst: cofinsCst.trim() } : {})
+                    }
+                  }
+                : {})
+            });
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              SKU
+              <input value={sku} onChange={(event) => setSku(event.target.value)} required placeholder="Ex: COCA-2L" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Unidade
+              <input value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="UN" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950 sm:col-span-2">
+              Nome
+              <input value={name} onChange={(event) => setName(event.target.value)} required placeholder="Ex: Coca-Cola 2L" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Preço de venda
+              <input value={salePrice} onChange={(event) => setSalePrice(event.target.value)} required placeholder="12.90" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Preço de custo
+              <input value={costPrice} onChange={(event) => setCostPrice(event.target.value)} placeholder="8.50" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Categoria
+              <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                <option value="">Sem categoria</option>
+                {categoryOptions.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid gap-1 text-sm font-medium text-slate-950">
+              Nova categoria
+              <div className="flex gap-2">
+                <input
+                  value={newCategoryName}
+                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  placeholder="Ex: Bebidas"
+                  className="flex-1 rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <button
+                  type="button"
+                  disabled={isCreatingCategory || !newCategoryName.trim()}
+                  onClick={async () => {
+                    const categoryName = newCategoryName.trim();
+                    if (!categoryName) {
+                      return;
+                    }
+
+                    try {
+                      const created = await onCreateCategory(categoryName);
+                      setCreatedCategories((current) => {
+                        const exists = current.some((item) => item.id === created.id);
+                        return exists ? current : [...current, created];
+                      });
+                      setCategoryId(created.id);
+                      setNewCategoryName("");
+                    } catch {
+                      // Feedback handled by global notification.
+                    }
+                  }}
+                  className="inline-flex min-w-[88px] items-center justify-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                >
+                  {isCreatingCategory ? <Loader2 aria-hidden="true" size={15} className="animate-spin" /> : null}
+                  Criar
+                </button>
+              </div>
+              <p className="text-xs font-normal text-muted-foreground">Criando aqui, ela já entra no select e fica selecionada.</p>
+            </div>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              EAN/Barcode
+              <input value={barcode} onChange={(event) => setBarcode(event.target.value)} placeholder="789..." className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Estoque inicial (opcional)
+              <input value={initialQuantity} onChange={(event) => setInitialQuantity(event.target.value)} placeholder="10" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Depósito inicial
+              <select value={initialWarehouseId} onChange={(event) => setInitialWarehouseId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                <option value="">Selecione</option>
+                {warehouses.map((warehouse) => (
+                  <option key={warehouse.id} value={warehouse.id}>
+                    {warehouse.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="rounded-lg border border-emerald-100 bg-emerald-50/50 p-3">
+            <div className="mb-2">
+              <p className="text-sm font-semibold text-slate-950">Dados fiscais do produto</p>
+              <p className="text-xs text-muted-foreground">
+                {canManageFiscalProfile ? "Preencha NCM/CST agora para evitar pendências fiscais depois." : "Seu usuário não tem permissão fiscal para editar esses dados."}
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                NCM
+                <input disabled={!canManageFiscalProfile} value={ncm} onChange={(event) => setNcm(event.target.value)} placeholder="22021000" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                CEST
+                <input disabled={!canManageFiscalProfile} value={cest} onChange={(event) => setCest(event.target.value)} placeholder="03.001.00" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                Unidade fiscal
+                <input disabled={!canManageFiscalProfile} value={fiscalUnit} onChange={(event) => setFiscalUnit(event.target.value)} placeholder="UN" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                ICMS CST
+                <input disabled={!canManageFiscalProfile} value={icmsCst} onChange={(event) => setIcmsCst(event.target.value)} placeholder="00" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                ICMS CSOSN
+                <input disabled={!canManageFiscalProfile} value={icmsCsosn} onChange={(event) => setIcmsCsosn(event.target.value)} placeholder="102" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                PIS CST
+                <input disabled={!canManageFiscalProfile} value={pisCst} onChange={(event) => setPisCst(event.target.value)} placeholder="01" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-950">
+                COFINS CST
+                <input disabled={!canManageFiscalProfile} value={cofinsCst} onChange={(event) => setCofinsCst(event.target.value)} placeholder="01" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none disabled:bg-slate-100 disabled:text-muted-foreground focus:ring-2 focus:ring-emerald-500" />
+              </label>
+            </div>
+          </div>
+
+          <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-end">
+            <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              Cancelar
+            </button>
+            <button type="submit" disabled={isSaving} className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <PackagePlus aria-hidden="true" size={16} />}
+              Criar produto
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function SalesPdvSection({
+  products,
+  warehouses,
+  isCreating,
+  onCreateSale
+}: {
+  products: ProductListResponse["data"];
+  warehouses: Array<{ id: string; name: string }>;
+  isCreating: boolean;
+  onCreateSale: (input: { warehouseId: string; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => void;
+}) {
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState("");
+  const [cart, setCart] = useState<Array<{ productId: string; name: string; unitPrice: string; quantity: number }>>([]);
+
+  useEffect(() => {
+    setSelectedWarehouseId((current) => current || warehouses[0]?.id || "");
+  }, [warehouses]);
+
+  const total = useMemo(
+    () =>
+      cart.reduce((sum, item) => {
+        return sum + Number(item.unitPrice) * item.quantity;
+      }, 0),
+    [cart]
+  );
+
+  function addProduct(product: ProductItem) {
+    const unitPrice = product.branchPrices[0]?.salePrice ?? product.salePrice;
+    setCart((current) => {
+      const existing = current.find((item) => item.productId === product.id);
+      if (existing) {
+        return current.map((item) => (item.productId === product.id ? { ...item, quantity: item.quantity + 1 } : item));
+      }
+      return [...current, { productId: product.id, name: product.name, unitPrice, quantity: 1 }];
+    });
+  }
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-[1.3fr_1fr]">
+      <article className="rounded-lg border border-border bg-white">
+        <div className="border-b border-border px-4 py-3">
+          <h2 className="text-base font-semibold">PDV - Produtos</h2>
+          <p className="text-sm text-muted-foreground">Selecione produtos para montar a venda.</p>
+        </div>
+        <div className="divide-y divide-border">
+          {products.map((product) => (
+            <div key={product.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-slate-950">{product.name}</p>
+                <p className="text-xs text-muted-foreground">{product.sku}</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-semibold">{money(product.branchPrices[0]?.salePrice ?? product.salePrice)}</span>
+                <button type="button" onClick={() => addProduct(product)} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97]">
+                  Adicionar
+                </button>
+              </div>
+            </div>
+          ))}
+          {products.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">Sem produtos. Cadastre pelo botão “Novo produto”.</p> : null}
+        </div>
+      </article>
+
+      <article className="rounded-lg border border-border bg-white">
+        <div className="border-b border-border px-4 py-3">
+          <h2 className="text-base font-semibold">Carrinho</h2>
+          <p className="text-sm text-muted-foreground">Finalize a venda com pagamento único (PIX).</p>
+        </div>
+        <div className="space-y-3 p-4">
+          <label className="grid gap-1 text-sm font-medium text-slate-950">
+            Depósito
+            <select value={selectedWarehouseId} onChange={(event) => setSelectedWarehouseId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+              <option value="">Selecione</option>
+              {warehouses.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>
+                  {warehouse.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="max-h-60 space-y-2 overflow-y-auto pr-1">
+            {cart.map((item) => (
+              <div key={item.productId} className="rounded-md border border-border p-2">
+                <p className="truncate text-sm font-medium text-slate-950">{item.name}</p>
+                <div className="mt-1 flex items-center justify-between">
+                  <input
+                    type="number"
+                    min={1}
+                    value={item.quantity}
+                    onChange={(event) => {
+                      const value = Math.max(1, Number(event.target.value || 1));
+                      setCart((current) => current.map((entry) => (entry.productId === item.productId ? { ...entry, quantity: value } : entry)));
+                    }}
+                    className="w-20 rounded-md border border-border px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <span className="text-sm font-semibold">{money(Number(item.unitPrice) * item.quantity)}</span>
+                </div>
+              </div>
+            ))}
+            {cart.length === 0 ? <p className="text-sm text-muted-foreground">Carrinho vazio.</p> : null}
+          </div>
+
+          <div className="flex items-center justify-between border-t border-border pt-3">
+            <span className="text-sm text-muted-foreground">Total</span>
+            <span className="text-lg font-semibold text-slate-950">{money(total)}</span>
+          </div>
+
+          <button
+            type="button"
+            disabled={isCreating || cart.length === 0 || !selectedWarehouseId}
+            onClick={() =>
+              onCreateSale({
+                warehouseId: selectedWarehouseId,
+                items: cart.map((item) => ({ productId: item.productId, quantity: String(item.quantity), unitPrice: item.unitPrice }))
+              })
+            }
+            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            {isCreating ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <ShoppingCart aria-hidden="true" size={16} />}
+            Finalizar venda
+          </button>
+        </div>
+      </article>
+    </section>
+  );
+}
+
 const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
   alerts: {
     title: "Alertas",
@@ -1635,7 +2301,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Digite algo na busca para encontrar registros.",
     primaryAction: "Abrir busca",
     actionTitle: "Abrir busca rápida?",
-    actionDescription: "A busca já consulta o backend com limite de resultados. A próxima etapa é transformar isso em command palette.",
+    actionDescription: "A busca consulta o backend com limite por tipo e já pode ser executada direto desta tela.",
     status: "connected"
   },
   sales: {
@@ -1647,20 +2313,44 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhuma venda encontrada.",
     primaryAction: "Nova venda",
     actionTitle: "Criar venda?",
-    actionDescription: "A API de venda já está pronta com baixa de estoque e idempotência. Falta conectar o formulário guiado completo.",
+    actionDescription: "A ação cria venda real no backend com baixa de estoque e idempotência.",
     status: "connected"
   },
   payments: {
     title: "Pagamentos",
     eyebrow: "Financeiro",
-    description: "Base para acompanhar meios de pagamento ligados às vendas e conciliação futura.",
+    description: "Visão dos pagamentos já registrados nas vendas, com status e total por operação.",
     endpoint: "/api/v1/sales",
     searchPlaceholder: "Buscar venda por cliente...",
     emptyMessage: "Nenhum pagamento encontrado nas vendas atuais.",
     primaryAction: "Conferir pagamentos",
     actionTitle: "Conferir pagamentos?",
-    actionDescription: "Pagamentos já existem dentro das vendas. O próximo passo é uma visão dedicada com filtros por método e período.",
-    status: "foundation"
+    actionDescription: "Este atalho leva para vendas, onde os pagamentos já são registrados e listados.",
+    status: "connected"
+  },
+  receivables: {
+    title: "Contas a receber",
+    eyebrow: "Financeiro",
+    description: "Acompanhe vendas com saldo pendente para priorizar cobrança e reduzir atraso de recebimento.",
+    endpoint: "/api/v1/sales",
+    searchPlaceholder: "Buscar venda por cliente...",
+    emptyMessage: "Nenhuma conta a receber encontrada.",
+    primaryAction: "Priorizar cobranças",
+    actionTitle: "Abrir contas a receber?",
+    actionDescription: "Este atalho leva para vendas para acompanhar e operar contas a receber.",
+    status: "connected"
+  },
+  payables: {
+    title: "Contas a pagar",
+    eyebrow: "Financeiro",
+    description: "Controle compromissos de compras para manter previsão de caixa e evitar atraso com fornecedores.",
+    endpoint: "/api/v1/purchases",
+    searchPlaceholder: "Buscar compra por fornecedor...",
+    emptyMessage: "Nenhuma conta a pagar encontrada.",
+    primaryAction: "Planejar pagamentos",
+    actionTitle: "Abrir contas a pagar?",
+    actionDescription: "Este atalho leva para compras para acompanhar e operar contas a pagar.",
+    status: "connected"
   },
   purchases: {
     title: "Compras",
@@ -1671,20 +2361,20 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhuma compra encontrada.",
     primaryAction: "Nova compra",
     actionTitle: "Criar compra?",
-    actionDescription: "A API de compras já está pronta. O formulário final precisa selecionar fornecedor, depósito e itens.",
+    actionDescription: "A ação cria compra real no backend com validação de fornecedor, itens e idempotência.",
     status: "connected"
   },
   multistore: {
-    title: "Dashboard multiloja",
+    title: "Lojas da empresa",
     eyebrow: "Comparação",
-    description: "Base para comparar lojas por vendas, estoque baixo e pendências sem misturar permissões.",
+    description: "Comparação rápida das lojas ativas da empresa para navegação e acompanhamento operacional.",
     endpoint: "/api/v1/branches",
     searchPlaceholder: "Buscar loja...",
     emptyMessage: "Nenhuma loja encontrada.",
     primaryAction: "Comparar lojas",
     actionTitle: "Comparar lojas?",
-    actionDescription: "A listagem de lojas está conectada. Os indicadores comparativos entram quando os agregados por filial estiverem prontos.",
-    status: "foundation"
+    actionDescription: "A ação cria uma nova loja com depósito inicial já vinculada à empresa atual.",
+    status: "connected"
   },
   transfers: {
     title: "Transferências",
@@ -1694,7 +2384,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhuma transferência encontrada.",
     primaryAction: "Nova transferência",
     actionTitle: "Criar transferência?",
-    actionDescription: "A API já valida origem, destino, produtos e permissões. Falta o assistente visual de envio e recebimento.",
+    actionDescription: "A ação cria transferência real no backend com validação de produto, estoque e permissões.",
     status: "connected"
   },
   counts: {
@@ -1705,7 +2395,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhum inventário encontrado.",
     primaryAction: "Criar inventário",
     actionTitle: "Criar inventário?",
-    actionDescription: "A API de inventário já existe. Falta conectar a tela de contagem produto a produto.",
+    actionDescription: "A ação cria contagem de inventário real no backend com idempotência.",
     status: "connected"
   },
   fiscal: {
@@ -1717,7 +2407,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhuma pendência fiscal encontrada.",
     primaryAction: "Ver regras fiscais",
     actionTitle: "Abrir regras fiscais?",
-    actionDescription: "Pendências e regras fiscais já têm API. A próxima etapa é o formulário completo por produto e regra versionada.",
+    actionDescription: "A ação cria regra fiscal real no backend para iniciar a configuração tributária.",
     status: "connected"
   },
   imports: {
@@ -1729,7 +2419,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhum job de importação ainda.",
     primaryAction: "Preparar importação",
     actionTitle: "Preparar importação?",
-    actionDescription: "Jobs de importação já são registrados no backend. Upload, staging detalhado e worker entram no fluxo completo.",
+    actionDescription: "A ação cria job de importação real no backend para iniciar o fluxo de migração.",
     status: "connected"
   },
   integrations: {
@@ -1741,8 +2431,18 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhuma conexão configurada ainda.",
     primaryAction: "Nova conexão",
     actionTitle: "Criar conexão?",
-    actionDescription: "Conexões por canal já são persistidas por empresa e loja. Credenciais reais continuam fora até ativar adapters seguros.",
+    actionDescription: "A ação cria conexão real no backend (sem iFood/99) para preparar integração operacional.",
     status: "connected"
+  },
+  channels: {
+    title: "Canais iFood/99 e marketplaces",
+    eyebrow: "Integrações futuras",
+    description: "Espaço reservado para iniciar conectores de iFood, 99Food e outros canais sem mudar a navegação depois.",
+    emptyMessage: "Canal ainda não iniciado.",
+    primaryAction: "Planejar conectores",
+    actionTitle: "Planejar conectores externos?",
+    actionDescription: "Fluxo planejado para próxima etapa, com credenciais seguras, catálogo, estoque e pedidos por canal.",
+    status: "planned"
   },
   reports: {
     title: "Relatórios",
@@ -1752,7 +2452,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhum relatório gerado ainda.",
     primaryAction: "Gerar relatório",
     actionTitle: "Gerar relatório?",
-    actionDescription: "Jobs de relatório já são criados com filtros no backend. A execução pesada fica preparada para worker.",
+    actionDescription: "A ação cria job de relatório real com filtros persistidos no backend.",
     status: "connected"
   },
   users: {
@@ -1764,7 +2464,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhum usuário encontrado.",
     primaryAction: "Novo usuário",
     actionTitle: "Criar usuário?",
-    actionDescription: "A API já valida papel e filiais. O próximo passo é o formulário com escopo de permissão claro.",
+    actionDescription: "A ação cria usuário real no backend com perfil e lojas permitidas.",
     status: "connected"
   },
   settings: {
@@ -1776,7 +2476,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     emptyMessage: "Nenhum depósito encontrado.",
     primaryAction: "Configurar empresa",
     actionTitle: "Configurar empresa?",
-    actionDescription: "Empresas, lojas e depósitos já possuem endpoints tenant-aware. Falta a tela agrupada para edição.",
+    actionDescription: "A ação cria depósito real na loja ativa para validar o fluxo de configuração.",
     status: "foundation"
   }
 };
@@ -1809,10 +2509,30 @@ function dateValue(value: unknown) {
   return typeof value === "string" ? new Date(value).toLocaleDateString("pt-BR") : "Sem data";
 }
 
+function isProductDetailsData(value: unknown): value is ProductItem {
+  const record = asRecord(value);
+  if (!record) {
+    return false;
+  }
+  return (
+    typeof record.id === "string" &&
+    typeof record.sku === "string" &&
+    typeof record.name === "string" &&
+    typeof record.unit === "string" &&
+    typeof record.salePrice === "string" &&
+    typeof record.active === "boolean"
+  );
+}
+
 function itemSummary(tab: OperationalTab, item: GenericListItem) {
   const fiscalReasons = Array.isArray(item.reasons) ? item.reasons.length : 0;
   const itemCount = Array.isArray(item.items) ? item.items.length : 0;
   const paymentCount = Array.isArray(item.payments) ? item.payments.length : 0;
+  const totalValue = Number(textValue(item.total, "0")) || 0;
+  const paidValue = Array.isArray(item.payments)
+    ? item.payments.reduce((sum, payment) => sum + (Number(asRecord(payment)?.amount ?? 0) || 0), 0)
+    : 0;
+  const pendingValue = Math.max(totalValue - paidValue, 0);
 
   switch (tab) {
     case "sales":
@@ -1828,6 +2548,20 @@ function itemSummary(tab: OperationalTab, item: GenericListItem) {
         subtitle: nestedName(item, "customer", "Cliente não informado"),
         meta: `${dateValue(item.createdAt)} · ${textValue(item.status)}`,
         status: paymentCount > 0 ? "Registrado" : "Sem pagamento"
+      };
+    case "receivables":
+      return {
+        title: `${money(pendingValue)} pendente`,
+        subtitle: nestedName(item, "customer", "Cliente não informado"),
+        meta: `Total ${money(totalValue)} · Recebido ${money(paidValue)}`,
+        status: pendingValue > 0 ? "Em aberto" : "Quitado"
+      };
+    case "payables":
+      return {
+        title: `${money(textValue(item.total, "0"))} a pagar`,
+        subtitle: nestedName(item, "supplier", "Fornecedor não informado"),
+        meta: `${nestedName(item, "warehouse", "Depósito não informado")} · ${dateValue(item.createdAt)}`,
+        status: textValue(item.status, "Pendente")
       };
     case "purchases":
       return {
@@ -1936,7 +2670,8 @@ function OperationalModuleSection({
   page,
   onPrevious,
   onNext,
-  onPrimaryAction
+  onPrimaryAction,
+  onViewDetails
 }: {
   tab: OperationalTab;
   config: OperationalModuleConfig;
@@ -1955,7 +2690,8 @@ function OperationalModuleSection({
   page: number;
   onPrevious: () => void;
   onNext: () => void;
-  onPrimaryAction: () => void;
+  onPrimaryAction: (item?: GenericListItem) => void;
+  onViewDetails: (item: GenericListItem) => void;
 }) {
   const connected = config.status === "connected";
   const statusClass = connected
@@ -1983,7 +2719,7 @@ function OperationalModuleSection({
 
           <button
             type="button"
-            onClick={onPrimaryAction}
+            onClick={() => onPrimaryAction()}
             className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] duration-150 ease-[var(--ease-out)] hover:bg-slate-800 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500"
           >
             <ArrowRight aria-hidden="true" size={16} />
@@ -2045,7 +2781,7 @@ function OperationalModuleSection({
             {items.map((item) => {
               const summaryItem = itemSummary(tab, item);
               return (
-                <article key={item.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_180px_140px] lg:items-center">
+                <article key={item.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_180px_280px] lg:items-center">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <h3 className="truncate text-sm font-medium">{summaryItem.title}</h3>
@@ -2054,13 +2790,24 @@ function OperationalModuleSection({
                     <p className="mt-1 truncate text-sm text-muted-foreground">{summaryItem.subtitle}</p>
                   </div>
                   <p className="truncate text-sm text-muted-foreground">{summaryItem.meta}</p>
-                  <button
-                    type="button"
-                    onClick={onPrimaryAction}
-                    className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                  >
-                    Abrir fluxo
-                  </button>
+                  <div className="flex items-center gap-2 lg:justify-end">
+                    <button
+                      type="button"
+                      onClick={() => onViewDetails(item)}
+                      title="Ver detalhes"
+                      aria-label="Ver detalhes"
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      <Eye aria-hidden="true" size={16} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onPrimaryAction(item)}
+                      className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      Abrir fluxo
+                    </button>
+                  </div>
                 </article>
               );
             })}
@@ -2153,6 +2900,7 @@ function SettingsSection({
   companyName,
   branchName,
   settings,
+  pricingConfig,
   branches,
   branchesLoading,
   newBranchName,
@@ -2163,11 +2911,16 @@ function SettingsSection({
   onCreateBranch,
   onToggle,
   onCriticalToggle,
+  onPricingChange,
+  onSavePricing,
+  isSavingPricing,
+  canManageFiscalPricing,
   onOpenAction
 }: {
   companyName: string;
   branchName: string;
   settings: SettingsState;
+  pricingConfig: PricingConfig;
   branches: BranchListResponse["data"];
   branchesLoading: boolean;
   newBranchName: string;
@@ -2178,6 +2931,10 @@ function SettingsSection({
   onCreateBranch: () => void;
   onToggle: (key: keyof SettingsState, checked: boolean) => void;
   onCriticalToggle: (key: keyof SettingsState, checked: boolean, title: string, description: string) => void;
+  onPricingChange: (key: keyof PricingConfig, value: number) => void;
+  onSavePricing: () => void;
+  isSavingPricing: boolean;
+  canManageFiscalPricing: boolean;
   onOpenAction: (title: string, description: string) => void;
 }) {
   return (
@@ -2265,6 +3022,52 @@ function SettingsSection({
       </SettingsCard>
 
       <div className="grid gap-4 xl:grid-cols-2">
+        <SettingsCard icon={ReceiptText} title="Precificação operacional" description="Defina premissas padrão para estimativa de margem no modal de produto.">
+          <div className="grid gap-4 p-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Impostos estimados (%)
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                value={pricingConfig.taxPercent}
+                onChange={(event) => onPricingChange("taxPercent", Number(event.target.value))}
+                disabled={!canManageFiscalPricing}
+                className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none transition-shadow duration-150 ease-[var(--ease-out)] focus:ring-2 focus:ring-emerald-500"
+              />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Taxas estimadas (%)
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={0.1}
+                value={pricingConfig.feePercent}
+                onChange={(event) => onPricingChange("feePercent", Number(event.target.value))}
+                disabled={!canManageFiscalPricing}
+                className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none transition-shadow duration-150 ease-[var(--ease-out)] focus:ring-2 focus:ring-emerald-500"
+              />
+            </label>
+          </div>
+          <div className="border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={onSavePricing}
+              disabled={!canManageFiscalPricing || isSavingPricing}
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] duration-150 ease-[var(--ease-out)] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              {isSavingPricing ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Check aria-hidden="true" size={16} />}
+              Salvar taxas
+            </button>
+            {!canManageFiscalPricing ? <p className="mt-2 text-xs text-muted-foreground">Seu usuário não tem permissão fiscal para alterar essas taxas.</p> : null}
+          </div>
+          <div className="border-t border-border bg-slate-50 px-4 py-3 text-sm text-muted-foreground">
+            Essas taxas são usadas no cálculo visual de margem da tela de produtos e ficam salvas no backend por empresa.
+          </div>
+        </SettingsCard>
+
         <SettingsCard icon={Settings} title="Tela e experiência" description="Preferências que deixam o uso diário mais rápido e menos poluído.">
           <SettingsToggleRow title="Modo escuro" description="Prepara a interface para fundo escuro quando a paleta final estiver ativada." checked={settings.darkMode} onChange={(checked) => onToggle("darkMode", checked)} />
           <SettingsToggleRow title="Menu compacto ao navegar" description="Ao abrir uma seção, a lateral encolhe e o foco fica no conteúdo." checked={settings.compactMenu} onChange={(checked) => onToggle("compactMenu", checked)} />
@@ -2427,7 +3230,8 @@ function UsersPermissionSection({
   page,
   onPrevious,
   onNext,
-  onEditUser
+  onEditUser,
+  onCreateUser
 }: {
   query: { data: UserListResponse | undefined; isLoading: boolean; isFetching: boolean; error: Error | null };
   roles: RoleListResponse["data"];
@@ -2442,6 +3246,7 @@ function UsersPermissionSection({
   onPrevious: () => void;
   onNext: () => void;
   onEditUser: (user: UserItem) => void;
+  onCreateUser: () => void;
 }) {
   const items = query.data?.data ?? [];
 
@@ -2457,6 +3262,14 @@ function UsersPermissionSection({
           <div className="rounded-lg border border-border bg-slate-50 p-3 text-sm">
             <p className="font-semibold text-slate-950">{roles.length} perfis disponíveis</p>
             <p className="mt-1 text-muted-foreground">{branches.length} lojas da empresa atual</p>
+            <button
+              type="button"
+              onClick={onCreateUser}
+              className="mt-3 inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              <Users aria-hidden="true" size={16} />
+              Novo usuário
+            </button>
           </div>
         </div>
 
@@ -2516,9 +3329,11 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
     title: "Operação",
     items: [
       { label: "Vendas", icon: ShoppingCart, tab: "sales", status: "available" },
-      { label: "Pagamentos", icon: CreditCard, tab: "payments", badge: "Base pronta", status: "foundation" },
+      { label: "Pagamentos", icon: CreditCard, tab: "payments", status: "available" },
+      { label: "Contas a receber", icon: ReceiptText, tab: "receivables", status: "available" },
+      { label: "Contas a pagar", icon: FileText, tab: "payables", status: "available" },
       { label: "Compras", icon: ShoppingBag, tab: "purchases", status: "available" },
-      { label: "Dashboard multiloja", icon: Store, tab: "multistore", badge: "Base pronta", status: "foundation" }
+      { label: "Lojas da empresa", icon: Store, tab: "multistore", status: "available" }
     ]
   },
   {
@@ -2535,8 +3350,7 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
     items: [
       { label: "Clientes", icon: Users, tab: "customers", status: "available" },
       { label: "Fornecedores", icon: Building2, tab: "suppliers", status: "available" },
-      { label: "Categorias", icon: Layers3, tab: "categories", status: "available" },
-      { label: "Empresas e lojas", icon: Store, tab: "settings", status: "available" }
+      { label: "Categorias", icon: Layers3, tab: "categories", status: "available" }
     ]
   },
   {
@@ -2545,6 +3359,7 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
       { label: "Fiscal", icon: Landmark, tab: "fiscal", status: "available" },
       { label: "Migração", icon: Upload, tab: "imports", status: "available" },
       { label: "Integrações", icon: Plug, tab: "integrations", status: "available" },
+      { label: "Canais iFood/99", icon: Plug, tab: "channels", badge: "Em breve", status: "soon" },
       { label: "Relatórios", icon: ReceiptText, tab: "reports", status: "available" }
     ]
   },
@@ -2660,7 +3475,7 @@ function AppSidebar({
         {!collapsed ? (
           <div className="mb-4 rounded-lg border border-border bg-slate-50 px-3 py-2 text-xs leading-5 text-muted-foreground">
             <p><span className="font-semibold text-slate-950">Disponível:</span> abre tela agora.</p>
-            <p><span className="font-semibold text-amber-700">Base pronta:</span> backend existe, tela ainda não.</p>
+            <p><span className="font-semibold text-amber-700">Base pronta:</span> backend ativo, tela dedicada em evolução.</p>
             <p><span className="font-semibold text-slate-500">Em breve:</span> planejado.</p>
           </div>
         ) : null}
@@ -2787,7 +3602,8 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [alert, setAlert] = useState<AppAlert | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
-  const [pricingProduct, setPricingProduct] = useState<ProductItem | null>(null);
+  const [detailsDialog, setDetailsDialog] = useState<DetailsDialogState | null>(null);
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
   const [settingsState, setSettingsState] = useState<SettingsState>({
     darkMode: false,
     compactMenu: true,
@@ -2823,6 +3639,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [categorySearchDraft, setCategorySearchDraft] = useState("");
   const [categorySearch, setCategorySearch] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
+  const [productDialogOpen, setProductDialogOpen] = useState(false);
   const [operationalLimit, setOperationalLimit] = useState(10);
   const [operationalCursorStack, setOperationalCursorStack] = useState<Array<string | null>>([null]);
   const [operationalSearchDraft, setOperationalSearchDraft] = useState("");
@@ -2841,7 +3658,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const productsQuery = useQuery<ProductListResponse>({
     queryKey: ["products", accessToken, productLimit, productCursor],
     queryFn: () => getProducts(accessToken, { limit: productLimit, cursor: productCursor }),
-    enabled: tab === "products"
+    enabled: tab === "products" || tab === "sales"
   });
   const balancesQuery = useQuery<StockBalanceListResponse>({
     queryKey: ["stock-balances", accessToken, inventoryLimit, inventoryCursor, inventorySearch],
@@ -2863,6 +3680,11 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     queryFn: () => getCategories(accessToken, { limit: categoryLimit, cursor: categoryCursor, search: categorySearch }),
     enabled: tab === "categories"
   });
+  const productCategoriesQuery = useQuery<CategoryListResponse>({
+    queryKey: ["product-categories", accessToken],
+    queryFn: () => getCategories(accessToken, { limit: 100 }),
+    enabled: tab === "products" || productDialogOpen
+  });
   const preferencesQuery = useQuery({
     queryKey: ["settings-preferences", accessToken],
     queryFn: () => getUserPreferences(accessToken)
@@ -2870,6 +3692,11 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const branchesQuery = useQuery<BranchListResponse>({
     queryKey: ["branches", accessToken],
     queryFn: () => getBranches(accessToken, { limit: 100 })
+  });
+  const warehousesQuery = useQuery<GenericListResponse, Error>({
+    queryKey: ["warehouses", accessToken],
+    queryFn: () => getPaginatedResource(accessToken, "/api/v1/warehouses", { limit: 100 }),
+    enabled: tab === "products" || tab === "sales" || tab === "settings"
   });
   const rolesQuery = useQuery<RoleListResponse>({
     queryKey: ["roles", accessToken],
@@ -2895,6 +3722,14 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     queryKey: ["dashboard", accessToken],
     queryFn: () => getDashboard(accessToken),
     enabled: tab === "overview"
+  });
+  const canReadPricingSettings = (meQuery.data?.tenant.permissions ?? []).includes("fiscal.read") || (meQuery.data?.tenant.permissions ?? []).includes("fiscal.manage");
+  const canManagePricingSettings = (meQuery.data?.tenant.permissions ?? []).includes("fiscal.manage");
+  const canManageFiscalProfile = canManagePricingSettings;
+  const pricingSettingsQuery = useQuery<PricingSettingsResponse, Error>({
+    queryKey: ["fiscal-pricing-settings", accessToken],
+    queryFn: () => getPricingSettings(accessToken),
+    enabled: canReadPricingSettings
   });
   const preferencesMutation = useMutation({
     mutationFn: (input: Partial<SettingsState>) => updateUserPreferences(accessToken, input),
@@ -3011,6 +3846,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       setNewCategoryName("");
       setCategoryCursorStack([null]);
       await queryClient.invalidateQueries({ queryKey: ["categories", accessToken] });
+      await queryClient.invalidateQueries({ queryKey: ["product-categories", accessToken] });
       setAlert({
         tone: "success",
         title: "Categoria criada.",
@@ -3043,6 +3879,265 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       });
     }
   });
+  const pricingSettingsMutation = useMutation({
+    mutationFn: (input: PricingConfig) => updatePricingSettings(accessToken, input),
+    onSuccess: async (settings) => {
+      setPricingConfig({
+        taxPercent: Number(settings.taxPercent),
+        feePercent: Number(settings.feePercent)
+      });
+      await queryClient.invalidateQueries({ queryKey: ["fiscal-pricing-settings", accessToken] });
+      setAlert({
+        tone: "success",
+        title: "Taxas fiscais atualizadas.",
+        description: "As taxas de precificação foram salvas no backend para a empresa atual."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível salvar as taxas.",
+        description: error instanceof Error ? error.message : "Verifique suas permissões fiscais e tente novamente."
+      });
+    }
+  });
+  const createProductMutation = useMutation({
+    mutationFn: (input: {
+      sku: string;
+      name: string;
+      unit: string;
+      salePrice: string;
+      costPrice?: string;
+      categoryId?: string;
+      barcodes: string[];
+      initialStock?: { warehouseId: string; quantity: string };
+      fiscalProfile?: ProductFiscalProfileInput;
+    }) => {
+      const { fiscalProfile, ...productInput } = input;
+      return createProduct(accessToken, productInput).then(async (createdProduct) => {
+        let fiscalError: string | null = null;
+        if (canManageFiscalProfile && fiscalProfile) {
+          const productId = textValue(asRecord(createdProduct)?.id, "");
+          if (productId) {
+            try {
+              await upsertProductFiscalProfile(accessToken, productId, fiscalProfile);
+            } catch (error) {
+              fiscalError = error instanceof Error ? error.message : "Falha ao salvar perfil fiscal.";
+            }
+          }
+        }
+        return { createdProduct, fiscalError };
+      });
+    },
+    onSuccess: async ({ fiscalError }) => {
+      setProductDialogOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["products", accessToken] });
+      setAlert({
+        tone: fiscalError ? "warning" : "success",
+        title: fiscalError ? "Produto criado com pendência fiscal." : "Produto criado.",
+        description: fiscalError ? `O cadastro do produto foi salvo, mas o perfil fiscal não foi aplicado: ${fiscalError}` : "O produto já está disponível para venda e controle de estoque."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível criar o produto.",
+        description: error instanceof Error ? error.message : "Revise os campos obrigatórios e tente novamente."
+      });
+    }
+  });
+  const dismissAlert = useCallback(() => setAlert(null), []);
+  const pdvSaleMutation = useMutation({
+    mutationFn: (input: { warehouseId: string; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => {
+      const total = input.items.reduce((sum, item) => sum + Number(item.quantity) * Number(item.unitPrice), 0);
+      return createSale(accessToken, {
+        warehouseId: input.warehouseId,
+        source: "POS",
+        discount: "0",
+        idempotencyKey: `web:pdv:${Date.now()}`,
+        items: input.items.map((item) => ({ ...item, discount: "0" })),
+        payments: [{ method: "PIX", amount: total.toFixed(2) }]
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-balances", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Venda concluída no PDV.",
+        description: "A venda foi registrada e o estoque foi atualizado."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível finalizar a venda.",
+        description: error instanceof Error ? error.message : "Revise carrinho, depósito e tente novamente."
+      });
+    }
+  });
+  const operationalActionMutation = useMutation({
+    mutationFn: async ({ tab }: { tab: OperationalTab; item?: GenericListItem }) => {
+      const token = accessToken;
+      const timestamp = Date.now();
+      const suffix = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+      const idempotency = (prefix: string) => `${prefix}:${suffix}`;
+
+      switch (tab) {
+        case "alerts": {
+          return createAlertRule(token, {
+            name: `Regra automática ${new Date(timestamp).toLocaleTimeString("pt-BR")}`,
+            type: "LOW_STOCK",
+            threshold: { minimumQuantity: 5 }
+          });
+        }
+        case "sales": {
+          const [products, warehouses, customers] = await Promise.all([
+            getProducts(token, { limit: 1 }),
+            getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }),
+            getCustomers(token, { limit: 1 })
+          ]);
+          const product = products.data[0];
+          const warehouse = warehouses.data[0];
+          if (!product || !warehouse) {
+            throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar venda.");
+          }
+          const unitPrice = product.branchPrices[0]?.salePrice ?? product.salePrice;
+          return createSale(token, {
+            warehouseId: String(warehouse.id),
+            ...(customers.data[0]?.id ? { customerId: customers.data[0].id } : {}),
+            source: "POS",
+            discount: "0",
+            idempotencyKey: idempotency("web:sale"),
+            items: [{ productId: product.id, quantity: "1", unitPrice, discount: "0" }],
+            payments: [{ method: "PIX", amount: unitPrice }]
+          });
+        }
+        case "purchases": {
+          const [products, warehouses, suppliers] = await Promise.all([
+            getProducts(token, { limit: 1 }),
+            getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }),
+            getSuppliers(token, { limit: 1 })
+          ]);
+          const product = products.data[0];
+          const warehouse = warehouses.data[0];
+          if (!product || !warehouse) {
+            throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar compra.");
+          }
+          const unitCost = product.costPrice ?? "1.00";
+          return createPurchase(token, {
+            warehouseId: String(warehouse.id),
+            ...(suppliers.data[0]?.id ? { supplierId: suppliers.data[0].id } : {}),
+            status: "ORDERED",
+            discount: "0",
+            idempotencyKey: idempotency("web:purchase"),
+            items: [{ productId: product.id, quantity: "1", unitCost, discount: "0" }]
+          });
+        }
+        case "transfers": {
+          const [products, warehouses, me] = await Promise.all([getProducts(token, { limit: 1 }), getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }), getMe(token)]);
+          const product = products.data[0];
+          const warehouse = warehouses.data[0];
+          if (!product || !warehouse) {
+            throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar transferência.");
+          }
+          return createStockTransfer(token, {
+            sourceWarehouseId: String(warehouse.id),
+            destinationBranchId: me.tenant.branchId,
+            destinationWarehouseId: String(warehouse.id),
+            reason: "Transferência criada pelo fluxo da tela",
+            idempotencyKey: idempotency("web:transfer"),
+            items: [{ productId: product.id, quantity: "1" }]
+          });
+        }
+        case "counts": {
+          const [products, warehouses] = await Promise.all([getProducts(token, { limit: 1 }), getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 })]);
+          const product = products.data[0];
+          const warehouse = warehouses.data[0];
+          if (!product || !warehouse) {
+            throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar inventário.");
+          }
+          return createInventoryCount(token, {
+            warehouseId: String(warehouse.id),
+            notes: "Contagem criada pelo fluxo da tela",
+            idempotencyKey: idempotency("web:count"),
+            items: [{ productId: product.id, countedQuantity: "1" }]
+          });
+        }
+        case "fiscal": {
+          return createTaxRule(token, {
+            name: `Regra ICMS ${new Date(timestamp).toLocaleDateString("pt-BR")}`,
+            taxType: "ICMS",
+            conditions: [{ field: "uf", operator: "EQUALS", value: "SP" }]
+          });
+        }
+        case "imports": {
+          return createImportJob(token, {
+            source: "CSV",
+            fileName: `importacao-${timestamp}.csv`
+          });
+        }
+        case "integrations": {
+          return createIntegrationConnection(token, {
+            channel: "MARKETPLACE",
+            externalAccountId: `marketplace-${suffix}`
+          });
+        }
+        case "reports": {
+          return createReportJob(token, {
+            type: "SALES",
+            filters: { preset: "today" }
+          });
+        }
+        case "users": {
+          const [roles, branches] = await Promise.all([getRoles(token, { limit: 100 }), getBranches(token, { limit: 100 })]);
+          const activeBranches = branches.data.filter((branch) => branch.active);
+          const role = roles.data[0];
+          if (!role || activeBranches.length === 0) {
+            throw new Error("É preciso ter ao menos 1 perfil e 1 loja ativa para criar usuário.");
+          }
+          return createUser(token, {
+            name: `Usuário ${new Date(timestamp).toLocaleTimeString("pt-BR")}`,
+            email: `usuario.${suffix}@local.test`,
+            password: "UserFlow123!",
+            roleId: role.id,
+            branchIds: activeBranches.map((branch) => branch.id)
+          });
+        }
+        case "multistore": {
+          return createBranch(token, {
+            name: `Loja ${new Date(timestamp).toLocaleTimeString("pt-BR")}`,
+            defaultWarehouseName: "Estoque Principal"
+          });
+        }
+        case "settings": {
+          return createWarehouse(token, {
+            name: `Depósito ${new Date(timestamp).toLocaleTimeString("pt-BR")}`
+          });
+        }
+        default:
+          throw new Error("Ação primária ainda não está disponível para esta tela.");
+      }
+    },
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries();
+      setAlert({
+        tone: "success",
+        title: "Fluxo executado com sucesso.",
+        description: `A ação principal da tela de ${operationalModules[variables.tab]?.title ?? "operação"} foi concluída no backend.`
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível concluir o fluxo.",
+        description: error instanceof Error ? error.message : "Verifique permissões, dados obrigatórios e tente novamente."
+      });
+    }
+  });
 
   const activeContext = useMemo(() => {
     const data = meQuery.data;
@@ -3054,6 +4149,13 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const companyName = activeContext.company?.tradeName ?? activeContext.company?.legalName ?? "Minha empresa";
   const branchName = activeContext.branch?.name ?? "Minha loja";
   const userName = meQuery.data?.user.name ?? "Usuário";
+  const warehouseOptions = useMemo(
+    () =>
+      (warehousesQuery.data?.data ?? [])
+        .map((item) => ({ id: String(item.id ?? ""), name: textValue(item.name, "Depósito") }))
+        .filter((item) => item.id),
+    [warehousesQuery.data?.data]
+  );
 
   useEffect(() => {
     if (!preferencesQuery.data) {
@@ -3066,6 +4168,17 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   useEffect(() => {
     document.documentElement.classList.toggle("dark", settingsState.darkMode);
   }, [settingsState.darkMode]);
+
+  useEffect(() => {
+    if (!pricingSettingsQuery.data) {
+      return;
+    }
+
+    setPricingConfig({
+      taxPercent: Number(pricingSettingsQuery.data.taxPercent),
+      feePercent: Number(pricingSettingsQuery.data.feePercent)
+    });
+  }, [pricingSettingsQuery.data]);
 
   const focusContentAfterNavigation = useCallback(() => {
     setSidebarCollapsed(settingsState.compactMenu);
@@ -3103,18 +4216,58 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     });
   }
 
-  function confirmImportantAction(title: string, description: string) {
+  function runOperationalPrimaryAction(tabToRun: OperationalTab, item?: GenericListItem) {
+    if (tabToRun === "channels") {
+      setAlert({
+        tone: "info",
+        title: "Canal iFood/99 ainda não habilitado.",
+        description: "Essa área segue reservada para ativação futura dos conectores externos."
+      });
+      return;
+    }
+
+    if (tabToRun === "global-search") {
+      if (!operationalSearchDraft.trim()) {
+        setAlert({
+          tone: "warning",
+          title: "Digite algo para buscar.",
+          description: "A busca rápida consulta produto, cliente, fornecedor e venda no backend."
+        });
+        return;
+      }
+      setOperationalSearch(operationalSearchDraft.trim());
+      resetOperationalPagination();
+      return;
+    }
+
+    if (tabToRun === "payments" || tabToRun === "receivables") {
+      router.push(tabRoutes.sales);
+      return;
+    }
+
+    if (tabToRun === "payables") {
+      router.push(tabRoutes.purchases);
+      return;
+    }
+
+    if (tabToRun === "settings") {
+      setConfirmAction({
+        title: "Criar novo depósito?",
+        description: "Será criado um depósito na loja ativa para validar o fluxo completo da tela.",
+        confirmLabel: "Criar depósito",
+        onConfirm: () => operationalActionMutation.mutate({ tab: tabToRun, ...(item ? { item } : {}) })
+      });
+      return;
+    }
+
+    const config = operationalModules[tabToRun];
+    const title = config?.actionTitle ?? "Executar fluxo?";
+    const description = config?.actionDescription ?? "Esta ação será executada no backend.";
     setConfirmAction({
       title,
       description,
-      confirmLabel: "Entendi",
-      onConfirm: () => {
-        setAlert({
-          tone: "info",
-          title: "Fluxo ainda nao conectado.",
-          description: "A confirmacao ja esta pronta. A proxima etapa e ligar essa acao ao endpoint correspondente quando a tela operacional for implementada."
-        });
-      }
+      confirmLabel: config?.primaryAction ?? "Executar",
+      onConfirm: () => operationalActionMutation.mutate({ tab: tabToRun, ...(item ? { item } : {}) })
     });
   }
 
@@ -3124,6 +4277,24 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       setSidebarCollapsed(checked);
     }
     preferencesMutation.mutate({ [key]: checked });
+  }
+
+  function updatePricingConfig(key: keyof PricingConfig, value: number) {
+    const next = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
+    setPricingConfig((current) => ({ ...current, [key]: Number(next.toFixed(2)) }));
+  }
+
+  function savePricingConfig() {
+    if (!canManagePricingSettings) {
+      setAlert({
+        tone: "warning",
+        title: "Sem permissão para alterar taxas.",
+        description: "Seu usuário precisa da permissão fiscal.manage para editar essa configuração."
+      });
+      return;
+    }
+
+    pricingSettingsMutation.mutate(pricingConfig);
   }
 
   function confirmSettingToggle(key: keyof SettingsState, checked: boolean, title: string, description: string) {
@@ -3371,33 +4542,34 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         </header>
 
       <section ref={contentFocusRef} tabIndex={-1} className="mx-auto max-w-7xl px-4 py-6 outline-none">
-        {alert ? <SystemAlert alert={alert} onDismiss={() => setAlert(null)} /> : null}
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal text-pretty">
-              {meQuery.isLoading ? "Carregando..." : `Bom dia, ${meQuery.data?.user.name ?? "Luis"}`}
-            </h1>
-            <p className="text-sm text-muted-foreground">O que precisa da sua atenção hoje.</p>
+        {tab === "overview" ? (
+          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-normal text-pretty">
+                {meQuery.isLoading ? "Carregando..." : `Bom dia, ${meQuery.data?.user.name ?? "Luis"}`}
+              </h1>
+              <p className="text-sm text-muted-foreground">O que precisa da sua atenção hoje.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => runOperationalPrimaryAction("sales")}
+                className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                <ShoppingCart aria-hidden="true" size={16} />
+                Nova venda
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push(tabRoutes.products)}
+                className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                <PackagePlus aria-hidden="true" size={16} />
+                Novo produto
+              </button>
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => confirmImportantAction("Criar nova venda?", "Venda concluida reduz estoque e gera historico. Como a tela de venda ainda nao esta pronta, a acao fica protegida por confirmacao.")}
-              className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            >
-              <ShoppingCart aria-hidden="true" size={16} />
-              Nova venda
-            </button>
-            <button
-              type="button"
-              onClick={() => confirmImportantAction("Criar novo produto?", "Cadastrar produto afeta precos, estoque e pendencias fiscais. A tela de cadastro completo sera conectada em seguida.")}
-              className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            >
-              <PackagePlus aria-hidden="true" size={16} />
-              Novo produto
-            </button>
-          </div>
-        </div>
+        ) : null}
 
         <div className="mb-4 rounded-lg border border-border bg-white px-4 py-3">
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Tela atual</p>
@@ -3450,7 +4622,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                 <div className="mt-3 grid gap-2">
                   <button
                     type="button"
-                    onClick={() => confirmImportantAction("Registrar entrada de estoque?", "Entrada de estoque altera saldo e deve gerar StockMovement. A confirmacao evita ajuste acidental.")}
+                    onClick={() => runOperationalPrimaryAction("counts")}
                     className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                   >
                     <Box aria-hidden="true" size={16} />
@@ -3458,7 +4630,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                   </button>
                   <button
                     type="button"
-                    onClick={() => confirmImportantAction("Transferir estoque?", "Transferencia movimenta origem e destino. O fluxo final deve validar loja, deposito e permissao antes de gravar.")}
+                    onClick={() => runOperationalPrimaryAction("transfers")}
                     className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                   >
                     <ArrowRightLeft aria-hidden="true" size={16} />
@@ -3481,25 +4653,35 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                 <h2 className="text-base font-semibold">Produtos</h2>
                 <p className="text-sm text-muted-foreground">Pagina {productCursorStack.length}. Mostrando ate {productLimit} por tela.</p>
               </div>
-              <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                Por tela
-                <select
-                  value={productLimit}
-                  onChange={(event) => resetProductPagination(Number(event.target.value))}
-                  className="rounded-md border border-border bg-white px-2 py-1.5 text-sm font-medium text-slate-950 outline-none focus:ring-2 focus:ring-emerald-500"
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setProductDialogOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                 >
-                  {[5, 10, 25, 50].map((limit) => (
-                    <option key={limit} value={limit}>
-                      {limit}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  <PackagePlus aria-hidden="true" size={16} />
+                  Novo produto
+                </button>
+                <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                  Por tela
+                  <select
+                    value={productLimit}
+                    onChange={(event) => resetProductPagination(Number(event.target.value))}
+                    className="rounded-md border border-border bg-white px-2 py-1.5 text-sm font-medium text-slate-950 outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    {[5, 10, 25, 50].map((limit) => (
+                      <option key={limit} value={limit}>
+                        {limit}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
             <div className="divide-y divide-border">
               {productsQuery.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando produtos...</p> : null}
               {productsQuery.data?.data.map((product) => (
-                <article key={product.id} className="grid gap-3 px-4 py-4 sm:grid-cols-[1fr_120px_120px_120px_150px] sm:items-center">
+                <article key={product.id} className="grid gap-3 px-4 py-4 sm:grid-cols-[1fr_120px_120px_240px_150px] sm:items-center">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <h3 className="truncate text-sm font-medium">{product.name}</h3>
@@ -3513,13 +4695,17 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                   </div>
                   <p className="text-sm text-muted-foreground">{product.barcodes[0]?.barcode ?? "Sem EAN"}</p>
                   <p className="text-sm font-medium tabular-nums">{money(product.branchPrices[0]?.salePrice ?? product.salePrice)}</p>
-                  <button
-                    type="button"
-                    onClick={() => setPricingProduct(product)}
-                    className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                  >
-                    Ver margem
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDetailsDialog({ title: `Produto: ${product.name}`, data: product, variant: "product" })}
+                      title="Ver detalhes"
+                      aria-label="Ver detalhes"
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      <Eye aria-hidden="true" size={16} />
+                    </button>
+                  </div>
                   <div className="flex items-center justify-between gap-3 sm:justify-end">
                     <span className="text-xs text-muted-foreground sm:hidden">Disponivel</span>
                     <ModernSwitch
@@ -3584,6 +4770,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             page={customerCursorStack.length}
             onPrevious={goToPreviousCustomerPage}
             onNext={goToNextCustomerPage}
+            onViewDetails={(person) => setDetailsDialog({ title: `Cliente: ${person.name}`, data: person })}
           />
         ) : null}
 
@@ -3609,6 +4796,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             page={supplierCursorStack.length}
             onPrevious={goToPreviousSupplierPage}
             onNext={goToNextSupplierPage}
+            onViewDetails={(person) => setDetailsDialog({ title: `Fornecedor: ${person.name}`, data: person })}
           />
         ) : null}
 
@@ -3718,6 +4906,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             companyName={companyName}
             branchName={branchName}
             settings={settingsState}
+            pricingConfig={pricingConfig}
             branches={branchesQuery.data?.data ?? []}
             branchesLoading={branchesQuery.isLoading}
             newBranchName={newBranchName}
@@ -3728,7 +4917,11 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onCreateBranch={createBranchFromSettings}
             onToggle={toggleSetting}
             onCriticalToggle={confirmSettingToggle}
-            onOpenAction={confirmImportantAction}
+            onPricingChange={updatePricingConfig}
+            onSavePricing={savePricingConfig}
+            isSavingPricing={pricingSettingsMutation.isPending}
+            canManageFiscalPricing={canManagePricingSettings}
+            onOpenAction={() => runOperationalPrimaryAction("settings")}
           />
         ) : null}
 
@@ -3754,10 +4947,20 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onPrevious={goToPreviousOperationalPage}
             onNext={goToNextOperationalPage}
             onEditUser={setSelectedUser}
+            onCreateUser={() => runOperationalPrimaryAction("users")}
           />
         ) : null}
 
-        {operationalConfig && isOperationalTab(tab) ? (
+        {tab === "sales" ? (
+          <SalesPdvSection
+            products={productsQuery.data?.data ?? []}
+            warehouses={warehouseOptions}
+            isCreating={pdvSaleMutation.isPending}
+            onCreateSale={(input) => pdvSaleMutation.mutate(input)}
+          />
+        ) : null}
+
+        {operationalConfig && isOperationalTab(tab) && tab !== "sales" ? (
           <OperationalModuleSection
             tab={tab}
             config={operationalConfig}
@@ -3778,13 +4981,26 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             page={operationalCursorStack.length}
             onPrevious={goToPreviousOperationalPage}
             onNext={goToNextOperationalPage}
-            onPrimaryAction={() => confirmImportantAction(operationalConfig.actionTitle, operationalConfig.actionDescription)}
+            onPrimaryAction={(item) => runOperationalPrimaryAction(tab, item)}
+            onViewDetails={(item) => setDetailsDialog({ title: `${operationalConfig.title}: ${textValue(item.name ?? item.id, "Registro")}`, data: item })}
           />
         ) : null}
       </section>
       </div>
       <ConfirmDialog action={confirmAction} onClose={() => setConfirmAction(null)} />
-      <PricingInsightDialog product={pricingProduct} onClose={() => setPricingProduct(null)} />
+      {alert ? <SystemAlert alert={alert} onDismiss={dismissAlert} /> : null}
+      <ProductCreateDialog
+        open={productDialogOpen}
+        categories={productCategoriesQuery.data?.data ?? []}
+        warehouses={warehouseOptions}
+        canManageFiscalProfile={canManageFiscalProfile}
+        isSaving={createProductMutation.isPending}
+        isCreatingCategory={categoryCreateMutation.isPending}
+        onClose={() => setProductDialogOpen(false)}
+        onCreateCategory={(name) => categoryCreateMutation.mutateAsync({ name })}
+        onSave={(input) => createProductMutation.mutate(input)}
+      />
+      <DetailsDialog details={detailsDialog} pricingConfig={pricingConfig} onClose={() => setDetailsDialog(null)} />
       <UserAccessDialog
         user={selectedUser}
         roles={rolesQuery.data?.data ?? []}

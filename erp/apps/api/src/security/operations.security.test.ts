@@ -145,6 +145,21 @@ describe("operations security", () => {
     await app.close();
   });
 
+  it("denies sale listing without sale.read permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/sales",
+      headers: { authorization: `Bearer ${await userToken(["sale.create"])}` }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.sale.findMany).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("does not cancel sale from another tenant", async () => {
     prismaMock.tx.sale.findFirst.mockResolvedValue(null);
     const { buildApp } = await import("../app.js");

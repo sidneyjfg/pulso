@@ -5,6 +5,7 @@ import {
   createTaxRuleVersionBodySchema,
   fiscalPendingQuerySchema,
   listQuerySchema,
+  upsertPricingSettingsBodySchema,
   updateTaxRuleBodySchema,
   upsertCompanyFiscalProfileBodySchema,
   upsertProductFiscalProfileBodySchema
@@ -134,7 +135,69 @@ const taxRuleSelect = {
   }
 } as const;
 
+const pricingSettingsSelect = {
+  id: true,
+  companyId: true,
+  taxPercent: true,
+  feePercent: true,
+  updatedAt: true
+} as const;
+
 export async function fiscalRoutes(app: FastifyInstance) {
+  app.get("/api/v1/fiscal/pricing-settings", { preHandler: [app.authenticateUser] }, async (request) => {
+    assertPermission(request.tenant!, "fiscal.read");
+    const settings = await prisma.companyPricingSetting.findUnique({
+      where: { companyId: request.tenant!.companyId },
+      select: pricingSettingsSelect
+    });
+
+    if (settings) {
+      return settings;
+    }
+
+    return {
+      id: null,
+      companyId: request.tenant!.companyId,
+      taxPercent: new Prisma.Decimal("6.00"),
+      feePercent: new Prisma.Decimal("3.00"),
+      updatedAt: null
+    };
+  });
+
+  app.put("/api/v1/fiscal/pricing-settings", { preHandler: [app.authenticateUser] }, async (request) => {
+    assertPermission(request.tenant!, "fiscal.manage");
+    const body = parseBody(upsertPricingSettingsBodySchema, request);
+
+    const before = await prisma.companyPricingSetting.findUnique({
+      where: { companyId: request.tenant!.companyId },
+      select: pricingSettingsSelect
+    });
+
+    const settings = await prisma.companyPricingSetting.upsert({
+      where: { companyId: request.tenant!.companyId },
+      create: {
+        companyId: request.tenant!.companyId,
+        taxPercent: new Prisma.Decimal(body.taxPercent),
+        feePercent: new Prisma.Decimal(body.feePercent)
+      },
+      update: {
+        taxPercent: new Prisma.Decimal(body.taxPercent),
+        feePercent: new Prisma.Decimal(body.feePercent)
+      },
+      select: pricingSettingsSelect
+    });
+
+    await audit(request, {
+      action: before ? "fiscal.pricing_settings.update" : "fiscal.pricing_settings.create",
+      entityType: "CompanyPricingSetting",
+      entityId: settings.id,
+      before,
+      after: settings
+    });
+
+    return settings;
+  });
+
   app.get("/api/v1/fiscal/company-profile", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "fiscal.read");
     return prisma.companyFiscalProfile.findUnique({

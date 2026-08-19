@@ -267,4 +267,106 @@ describe("settings and branch security", () => {
     expect(prismaMock.tx.userBranchAccess.upsert).toHaveBeenCalledTimes(2);
     await app.close();
   });
+
+  it("denies user access update without user.manage permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/users/cm12345678901234567890123/access",
+      headers: { authorization: `Bearer ${await userToken(["user.read"])}` },
+      payload: {
+        roleId: "cm11111111111111111111111",
+        branchIds: ["cm22222222222222222222222"]
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.tx.userCompanyAccess.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.tx.userBranchAccess.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("blocks assigning role from another company", async () => {
+    prismaMock.user.findFirst.mockResolvedValue({
+      id: "user_2",
+      name: "Operador",
+      email: "operador@local.test",
+      companyAccesses: [{ roleId: "role_old", active: true }],
+      branchAccesses: [{ branchId: "branch_1", roleId: "role_old", active: true }]
+    });
+    prismaMock.role.findFirst.mockResolvedValue(null);
+    prismaMock.branch.findMany.mockResolvedValue([{ id: "cm22222222222222222222222" }]);
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/users/cm12345678901234567890123/access",
+      headers: { authorization: `Bearer ${await userToken(["user.manage"])}` },
+      payload: {
+        roleId: "cm44444444444444444444444",
+        branchIds: ["cm22222222222222222222222"]
+      }
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ code: "ROLE_NOT_FOUND" });
+    expect(prismaMock.tx.userCompanyAccess.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.tx.userBranchAccess.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("blocks assigning branches outside authenticated company", async () => {
+    prismaMock.user.findFirst.mockResolvedValue({
+      id: "user_2",
+      name: "Operador",
+      email: "operador@local.test",
+      companyAccesses: [{ roleId: "role_old", active: true }],
+      branchAccesses: [{ branchId: "branch_1", roleId: "role_old", active: true }]
+    });
+    prismaMock.role.findFirst.mockResolvedValue({ id: "cm11111111111111111111111" });
+    prismaMock.branch.findMany.mockResolvedValue([{ id: "cm22222222222222222222222" }]);
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/users/cm12345678901234567890123/access",
+      headers: { authorization: `Bearer ${await userToken(["user.manage"])}` },
+      payload: {
+        roleId: "cm11111111111111111111111",
+        branchIds: ["cm22222222222222222222222", "cm99999999999999999999999"]
+      }
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ code: "BRANCH_NOT_FOUND" });
+    expect(prismaMock.tx.userCompanyAccess.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.tx.userBranchAccess.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("denies user creation without user.manage permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/users",
+      headers: { authorization: `Bearer ${await userToken(["user.read"])}` },
+      payload: {
+        name: "Novo Usuário",
+        email: "novo@local.test",
+        password: "Senha123!",
+        roleId: "cm11111111111111111111111",
+        branchIds: ["cm22222222222222222222222"]
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.role.findFirst).not.toHaveBeenCalled();
+    await app.close();
+  });
 });

@@ -16,6 +16,10 @@ const prismaMock = vi.hoisted(() => ({
   stockBalance: {
     findMany: vi.fn()
   },
+  inventoryCount: {
+    findMany: vi.fn(),
+    create: vi.fn()
+  },
   auditLog: {
     create: vi.fn()
   }
@@ -185,6 +189,44 @@ describe("product and inventory security", () => {
     });
 
     expect(response.statusCode).toBe(403);
+    expect(prismaMock.product.findFirst).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("denies inventory count listing without inventory.read permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+    const token = await userToken(["inventory.adjust"]);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/inventory/counts",
+      headers: { authorization: `Bearer ${token}` }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.inventoryCount.findMany).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("denies inventory count creation without inventory.adjust permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+    const token = await userToken(["inventory.read"]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/inventory/counts",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        warehouseId: "cm12345678901234567890124",
+        idempotencyKey: "inventory-count-no-adjust-permission",
+        items: [{ productId: "cm12345678901234567890123", countedQuantity: "5" }]
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.inventoryCount.create).not.toHaveBeenCalled();
     expect(prismaMock.product.findFirst).not.toHaveBeenCalled();
     await app.close();
   });

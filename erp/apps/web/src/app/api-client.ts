@@ -143,6 +143,14 @@ export type GenericListResponse = {
   summary?: Record<string, unknown>;
 };
 
+export type PricingSettingsResponse = {
+  id: string | null;
+  companyId: string;
+  taxPercent: string;
+  feePercent: string;
+  updatedAt: string | null;
+};
+
 export type DashboardResponse = {
   today: {
     salesTotal: string;
@@ -292,6 +300,34 @@ export async function createCategory(accessToken: string, body: { name: string }
   return parseResponse<{ id: string; name: string; active: boolean }>(response);
 }
 
+export async function createProduct(
+  accessToken: string,
+  body: {
+    sku: string;
+    name: string;
+    unit?: string;
+    salePrice: string;
+    costPrice?: string;
+    categoryId?: string;
+    barcodes?: string[];
+    initialStock?: {
+      warehouseId: string;
+      quantity: string;
+    };
+  }
+) {
+  const response = await fetch(`${API_URL}/api/v1/products`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<GenericListItem>(response);
+}
+
 export async function updateCategoryActive(accessToken: string, categoryId: string, active: boolean) {
   const response = await fetch(`${API_URL}/api/v1/categories/${categoryId}`, {
     method: "PATCH",
@@ -426,4 +462,219 @@ export async function getDashboard(accessToken: string) {
   });
 
   return parseResponse<DashboardResponse>(response);
+}
+
+export async function getPricingSettings(accessToken: string) {
+  const response = await fetch(`${API_URL}/api/v1/fiscal/pricing-settings`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+
+  return parseResponse<PricingSettingsResponse>(response);
+}
+
+export async function updatePricingSettings(accessToken: string, body: { taxPercent: number; feePercent: number }) {
+  const response = await fetch(`${API_URL}/api/v1/fiscal/pricing-settings`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<PricingSettingsResponse>(response);
+}
+
+async function requestWithBody<TResponse, TBody extends Record<string, unknown>>(
+  accessToken: string,
+  method: "POST" | "PATCH" | "PUT",
+  path: `/api/v1/${string}`,
+  body: TBody
+) {
+  const response = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<TResponse>(response);
+}
+
+export async function createSale(
+  accessToken: string,
+  body: {
+    customerId?: string;
+    warehouseId: string;
+    source?: "MANUAL" | "POS" | "MARKETPLACE" | "ECOMMERCE" | "API" | "IMPORT" | "OTHER";
+    discount?: string;
+    idempotencyKey: string;
+    items: Array<{ productId: string; quantity: string; unitPrice: string; discount?: string }>;
+    payments?: Array<{ method: "CASH" | "CREDIT_CARD" | "DEBIT_CARD" | "PIX" | "BANK_TRANSFER" | "VOUCHER" | "OTHER"; amount: string }>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/sales", body);
+}
+
+export async function createPurchase(
+  accessToken: string,
+  body: {
+    supplierId?: string;
+    warehouseId: string;
+    status?: "DRAFT" | "ORDERED";
+    discount?: string;
+    idempotencyKey: string;
+    items: Array<{ productId: string; quantity: string; unitCost: string; discount?: string }>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/purchases", body);
+}
+
+export async function createStockTransfer(
+  accessToken: string,
+  body: {
+    sourceWarehouseId: string;
+    destinationBranchId: string;
+    destinationWarehouseId: string;
+    reason?: string;
+    idempotencyKey: string;
+    items: Array<{ productId: string; quantity: string }>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/inventory/transfers", body);
+}
+
+export async function createInventoryCount(
+  accessToken: string,
+  body: {
+    warehouseId: string;
+    notes?: string;
+    idempotencyKey: string;
+    items: Array<{ productId: string; countedQuantity: string }>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/inventory/counts", body);
+}
+
+export async function createAlertRule(
+  accessToken: string,
+  body: {
+    name: string;
+    type: "LOW_STOCK" | "OUT_OF_STOCK" | "FISCAL_PENDING" | "IMPORT_ERROR" | "INTEGRATION_ERROR" | "SECURITY" | "OTHER";
+    branchId?: string;
+    threshold?: Record<string, unknown>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/alerts/rules", body);
+}
+
+export async function createImportJob(
+  accessToken: string,
+  body: {
+    source?: "CSV" | "XLSX" | "BLING" | "TINY" | "OMIE" | "CONTA_AZUL" | "OTHER";
+    branchId?: string;
+    fileName?: string;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/imports/jobs", body);
+}
+
+export async function createIntegrationConnection(
+  accessToken: string,
+  body: {
+    channel: "MARKETPLACE" | "ECOMMERCE" | "POS" | "API" | "OTHER";
+    branchId?: string;
+    externalAccountId?: string;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/integrations/connections", body);
+}
+
+export async function createReportJob(
+  accessToken: string,
+  body: {
+    type: "SALES" | "INVENTORY" | "PURCHASES" | "FISCAL" | "CUSTOM";
+    branchId?: string;
+    filters?: Record<string, unknown>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/reports/jobs", body);
+}
+
+export async function createTaxRule(
+  accessToken: string,
+  body: {
+    name: string;
+    description?: string;
+    taxType: "ICMS" | "PIS" | "COFINS" | "IBS" | "CBS" | "ISS" | "IPI" | "OTHER";
+    conditions?: Array<{
+      field: string;
+      operator: "EQUALS" | "NOT_EQUALS" | "IN" | "NOT_IN" | "STARTS_WITH";
+      value: string;
+    }>;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/fiscal/tax-rules", body);
+}
+
+export async function createUser(
+  accessToken: string,
+  body: {
+    name: string;
+    email: string;
+    password: string;
+    roleId: string;
+    branchIds: string[];
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/users", body);
+}
+
+export async function createWarehouse(
+  accessToken: string,
+  body: {
+    name: string;
+    branchId?: string;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/warehouses", body);
+}
+
+export async function upsertProductFiscalProfile(
+  accessToken: string,
+  productId: string,
+  body: {
+    ncm?: string;
+    cest?: string;
+    origin?: "NATIONAL" | "FOREIGN_DIRECT" | "FOREIGN_INTERNAL";
+    fiscalUnit?: string;
+    productType?: "MERCHANDISE" | "SERVICE" | "RAW_MATERIAL" | "PACKAGING" | "FIXED_ASSET" | "CONSUMPTION" | "OTHER";
+    icmsCst?: string;
+    icmsCsosn?: string;
+    pisCst?: string;
+    cofinsCst?: string;
+  }
+) {
+  const response = await fetch(`${API_URL}/api/v1/fiscal/products/${productId}/profile`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      origin: body.origin ?? "NATIONAL",
+      fiscalUnit: body.fiscalUnit ?? "UN",
+      productType: body.productType ?? "MERCHANDISE",
+      ...(body.ncm ? { ncm: body.ncm } : {}),
+      ...(body.cest ? { cest: body.cest } : {}),
+      ...(body.icmsCst ? { icmsCst: body.icmsCst } : {}),
+      ...(body.icmsCsosn ? { icmsCsosn: body.icmsCsosn } : {}),
+      ...(body.pisCst ? { pisCst: body.pisCst } : {}),
+      ...(body.cofinsCst ? { cofinsCst: body.cofinsCst } : {})
+    })
+  });
+
+  return parseResponse<GenericListItem>(response);
 }
