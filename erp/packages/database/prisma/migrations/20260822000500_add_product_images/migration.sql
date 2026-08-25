@@ -1,0 +1,7 @@
+ALTER TABLE `Product`
+  ADD COLUMN `imageDataUrl` LONGTEXT NULL,
+  ADD COLUMN `imageMimeType` VARCHAR(191) NULL,
+  ADD COLUMN `imageFileName` VARCHAR(191) NULL,
+  ADD COLUMN `imageSizeBytes` INTEGER NULL,
+  ADD COLUMN `imageUpdatedAt` DATETIME(3) NULL,
+  ADD COLUMN `ifoodImagePath` VARCHAR(191) NULL;

@@ -35,6 +35,7 @@ model Company {
   suppliers      Supplier[]
   sales          Sale[]
   purchases      Purchase[]
+  financialEntries FinancialEntry[]
   fiscalProfile  CompanyFiscalProfile?
   pricingSetting CompanyPricingSetting?
   taxRules       TaxRule[]
@@ -42,6 +43,7 @@ model Company {
   alertRules     AlertRule[]
   importJobs     ImportJob[]
   integrationConnections IntegrationConnection[]
+  ifoodOrderPendingItems IfoodOrderPendingItem[]
   reportJobs     ReportJob[]
   outboxEvents   OutboxEvent[]
   webhookEvents  WebhookEvent[]
@@ -94,6 +96,7 @@ model Branch {
   userPreferences UserPreference[]
   sales     Sale[]
   purchases Purchase[]
+  financialEntries FinancialEntry[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -128,6 +131,7 @@ model Category {
   name      String
   active    Boolean  @default(true)
   products  Product[]
+  ifoodCatalogCategories IfoodCatalogCategory[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -149,6 +153,12 @@ model Product {
   costPrice   Decimal? @db.Decimal(15, 2)
   salePrice   Decimal  @db.Decimal(15, 2)
   active      Boolean  @default(true)
+  imageDataUrl String? @db.LongText
+  imageMimeType String?
+  imageFileName String?
+  imageSizeBytes Int?
+  imageUpdatedAt DateTime?
+  ifoodImagePath String?
   barcodes    ProductBarcode[]
   branchPrices ProductBranchPrice[]
   stockBalances StockBalance[]
@@ -158,6 +168,7 @@ model Product {
   saleItems SaleItem[]
   purchaseItems PurchaseItem[]
   fiscalProfile ProductFiscalProfile?
+  ifoodCatalogItems IfoodCatalogItem[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -248,6 +259,7 @@ model StockBalance {
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
   product     Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
   quantity    Decimal  @default(0) @db.Decimal(15, 3)
+  reservedQuantity Decimal @default(0) @db.Decimal(15, 3)
   updatedAt   DateTime @updatedAt
 
   @@unique([companyId, branchId, warehouseId, productId])
@@ -384,6 +396,7 @@ model Sale {
   idempotencyKey String
   items          SaleItem[]
   payments       Payment[]
+  ifoodPendingItems IfoodOrderPendingItem[]
   createdAt      DateTime   @default(now())
   cancelledAt    DateTime?
   updatedAt      DateTime   @updatedAt
@@ -405,9 +418,40 @@ model SaleItem {
   discount    Decimal  @default(0) @db.Decimal(15, 2)
   total       Decimal  @db.Decimal(15, 2)
   createdAt   DateTime @default(now())
+  ifoodPendingItem IfoodOrderPendingItem?
 
   @@index([saleId])
   @@index([productId])
+}
+
+model IfoodOrderPendingItem {
+  id                      String   @id @default(cuid())
+  companyId               String
+  branchId                String
+  integrationConnectionId String
+  saleId                  String
+  saleItemId              String   @unique
+  ifoodOrderId            String
+  ifoodItemId             String
+  externalCode            String?
+  ean                     String?
+  name                    String
+  quantity                Decimal  @db.Decimal(15, 3)
+  unitPrice               Decimal  @db.Decimal(15, 2)
+  status                  String   @default("PENDING_LINK")
+  resolvedProductId       String?
+  resolvedAt              DateTime?
+  lastError               String?  @db.Text
+  company                 Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  sale                    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  saleItem                SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([companyId, branchId, status, createdAt], map: "ifood_pending_company_branch_status_idx")
+  @@index([integrationConnectionId, status, createdAt], map: "ifood_pending_connection_status_idx")
+  @@index([ifoodOrderId], map: "ifood_pending_order_idx")
+  @@index([ifoodItemId], map: "ifood_pending_item_idx")
 }
 
 model Payment {
@@ -419,6 +463,39 @@ model Payment {
   createdAt DateTime      @default(now())
 
   @@index([saleId])
+}
+
+model FinancialEntry {
+  id               String                 @id @default(cuid())
+  companyId        String
+  branchId         String
+  company          Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch           Branch                 @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  direction        FinancialEntryDirection
+  status           FinancialEntryStatus   @default(OPEN)
+  sourceType       FinancialEntrySourceType
+  sourceId         String?
+  installmentNumber Int                   @default(1)
+  installmentTotal Int                    @default(1)
+  description      String
+  partyName        String?
+  dueDate          DateTime
+  amount           Decimal                @db.Decimal(15, 2)
+  paidAmount       Decimal                @default(0) @db.Decimal(15, 2)
+  interestAmount   Decimal                @default(0) @db.Decimal(15, 2)
+  discountAmount   Decimal                @default(0) @db.Decimal(15, 2)
+  paymentMethod    PaymentMethod?
+  proofUrl         String?                @db.Text
+  proofFileName    String?
+  paidAt           DateTime?
+  cancelledAt      DateTime?
+  createdBy        String
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  @@unique([companyId, sourceType, sourceId, installmentNumber], map: "financial_entry_source_installment_uq")
+  @@index([companyId, branchId, direction, status, dueDate], map: "financial_entry_direction_status_due_idx")
+  @@index([companyId, branchId, sourceType, sourceId], map: "financial_entry_source_idx")
 }
 
 model Purchase {
@@ -633,14 +710,66 @@ model IntegrationConnection {
   channel           SalesChannel
   status            IntegrationStatus @default(DISCONNECTED)
   externalAccountId String?
+  accessToken       String?           @db.Text
+  refreshToken      String?           @db.Text
+  tokenExpiresAt    DateTime?
   connectedAt       DateTime?
   lastSyncAt        DateTime?
+  ecommerceStockMode String            @default("FULL")
+  ecommerceStockPercent Decimal?       @db.Decimal(5, 2)
+  ecommerceStockFixedQuantity Decimal? @db.Decimal(15, 3)
+  webhookEvents     WebhookEvent[]
+  ifoodCatalogCategories IfoodCatalogCategory[]
+  ifoodCatalogItems IfoodCatalogItem[]
   createdBy         String
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
   @@index([companyId, branchId, status])
   @@index([companyId, channel, status])
+}
+
+model IfoodCatalogCategory {
+  id                      String                @id @default(cuid())
+  companyId               String
+  integrationConnectionId String
+  categoryId              String
+  ifoodCategoryId         String
+  name                    String
+  status                  String                @default("SYNCED")
+  lastSyncedAt            DateTime?
+  lastError               String?               @db.Text
+  integrationConnection   IntegrationConnection @relation(fields: [integrationConnectionId], references: [id], onDelete: Cascade)
+  category                Category              @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+
+  @@unique([integrationConnectionId, categoryId])
+  @@index([companyId, integrationConnectionId])
+}
+
+model IfoodCatalogItem {
+  id                      String                @id @default(cuid())
+  companyId               String
+  branchId                String?
+  integrationConnectionId String
+  productId               String
+  ifoodCategoryId         String
+  ifoodItemId             String
+  ifoodProductId          String
+  externalCode            String
+  status                  String                @default("SYNCED")
+  lastSyncedAt            DateTime?
+  lastError               String?               @db.Text
+  integrationConnection   IntegrationConnection @relation(fields: [integrationConnectionId], references: [id], onDelete: Cascade)
+  product                 Product               @relation(fields: [productId], references: [id], onDelete: Restrict)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+
+  @@unique([integrationConnectionId, productId])
+  @@unique([integrationConnectionId, ifoodItemId])
+  @@index([companyId, branchId, status])
+  @@index([productId])
 }
 
 model ReportJob {
@@ -683,7 +812,9 @@ model OutboxEvent {
 model WebhookEvent {
   id              String        @id @default(cuid())
   companyId       String?
+  integrationConnectionId String?
   company         Company?      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  integrationConnection IntegrationConnection? @relation(fields: [integrationConnectionId], references: [id], onDelete: Restrict)
   channel         SalesChannel
   externalEventId String
   eventType       String
@@ -696,6 +827,7 @@ model WebhookEvent {
 
   @@unique([channel, externalEventId])
   @@index([companyId, status, createdAt])
+  @@index([integrationConnectionId, status, createdAt])
   @@index([channel, status, createdAt])
 }
 
@@ -963,6 +1095,8 @@ enum PersonType {
 }
 
 enum SaleStatus {
+  PENDING
+  RESERVED
   COMPLETED
   CANCELLED
 }
@@ -995,6 +1129,23 @@ enum PaymentMethod {
   BANK_TRANSFER
   VOUCHER
   OTHER
+}
+
+enum FinancialEntryDirection {
+  RECEIVABLE
+  PAYABLE
+}
+
+enum FinancialEntryStatus {
+  OPEN
+  PAID
+  CANCELLED
+}
+
+enum FinancialEntrySourceType {
+  SALE
+  PURCHASE
+  MANUAL
 }
 
 enum ProductFiscalOrigin {
@@ -1035,6 +1186,8 @@ enum TaxRuleConditionOperator {
 enum AlertType {
   LOW_STOCK
   OUT_OF_STOCK
+  IFOOD_ORDER
+  FINANCIAL_DUE
   FISCAL_PENDING
   IMPORT_ERROR
   INTEGRATION_ERROR

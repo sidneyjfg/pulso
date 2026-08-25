@@ -58,3 +58,39 @@ Cancela compra ainda nao recebida.
 ## Idempotencia
 
 Vendas e compras aceitam `idempotencyKey` para evitar duplicidade em retries.
+
+## Pedidos iFood (fase 2)
+
+Aplicativo iFood distribuido usa polling. A API tambem inicia polling automatico quando `IFOOD_ENABLED=true`.
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/events/poll" %}
+Busca eventos novos no iFood via `events:polling`, processa pedidos e envia `events/acknowledgment` apenas para eventos processados com sucesso.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/events" %}
+Recebe eventos de pedidos iFood, persiste evento antes do ACK logico, reserva estoque em `PLACED`/`CONFIRMED`, baixa estoque em `CONCLUDED` e libera/devolve em `CANCELLED`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/events/reprocess" %}
+Reprocessa eventos iFood pendentes (`RECEIVED`) ou com falha (`FAILED`).
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/integrations/connections/:id/ifood/events" %}
+Lista eventos iFood da conexao com status (`RECEIVED`, `PROCESSING`, `PROCESSED`, `FAILED`, `DUPLICATE`).
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/integrations/connections/:id/ifood/catalog/items" %}
+Lista itens a venda no catalogo iFood e marca quais ja estao vinculados a produtos do ERP.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/catalog/items/:ifoodItemId/link" %}
+Vincula um item existente no iFood a um produto existente no ERP.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/catalog/items/:ifoodItemId/create-product" %}
+Cria um produto ERP a partir do item iFood e salva o vinculo para processar pedidos.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/catalog/sync" %}
+Sincroniza catalogo iFood da loja ativa com validacao de codigo de barras, preco e estoque por produto.
+{% /endpoint %}

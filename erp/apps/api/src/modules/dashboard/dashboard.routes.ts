@@ -21,7 +21,10 @@ export async function dashboardRoutes(app: FastifyInstance) {
     const today = startOfToday();
     const lowStockLimit = new Prisma.Decimal(5);
 
-    const [salesToday, lowStockProducts, outOfStockProducts, pendingPurchases, lowStockItems, recentSales] = await Promise.all([
+    const dueUntil = new Date();
+    dueUntil.setDate(dueUntil.getDate() + 3);
+
+    const [salesToday, lowStockProducts, outOfStockProducts, pendingPurchases, lowStockItems, recentSales, ifoodSales, financialEntries] = await Promise.all([
       prisma.sale.aggregate({
         where: {
           companyId: tenant.companyId,
@@ -83,6 +86,42 @@ export async function dashboardRoutes(app: FastifyInstance) {
         },
         orderBy: { createdAt: "desc" },
         take: 5
+      }),
+      prisma.sale.findMany({
+        where: {
+          companyId: tenant.companyId,
+          branchId: tenant.branchId,
+          source: "IFOOD",
+          status: { in: ["PENDING", "RESERVED"] }
+        },
+        select: {
+          id: true,
+          total: true,
+          status: true,
+          createdAt: true,
+          customer: { select: { name: true } },
+          items: { select: { product: { select: { name: true } } }, take: 2 }
+        },
+        orderBy: { createdAt: "desc" },
+        take: 5
+      }),
+      prisma.financialEntry.findMany({
+        where: {
+          companyId: tenant.companyId,
+          branchId: tenant.branchId,
+          status: "OPEN",
+          dueDate: { lte: dueUntil }
+        },
+        select: {
+          id: true,
+          direction: true,
+          description: true,
+          partyName: true,
+          dueDate: true,
+          amount: true
+        },
+        orderBy: { dueDate: "asc" },
+        take: 5
       })
     ]);
 
@@ -94,16 +133,34 @@ export async function dashboardRoutes(app: FastifyInstance) {
         outOfStockProducts,
         pendingPurchases
       },
-      attention: lowStockItems.map((item) => ({
-        type: new Prisma.Decimal(item.quantity).lessThanOrEqualTo(0) ? "OUT_OF_STOCK" : "LOW_STOCK",
-        title: new Prisma.Decimal(item.quantity).lessThanOrEqualTo(0)
-          ? `${item.product.name} está sem estoque`
-          : `${item.product.name} está acabando`,
-        detail: `Restam ${decimalString(item.quantity)} ${item.product.unit} em ${item.warehouse.name}.`,
-        product: item.product,
-        warehouse: item.warehouse,
-        quantity: decimalString(item.quantity)
-      })),
+      attention: [
+        ...ifoodSales.map((sale) => ({
+          type: "IFOOD_ORDER" as const,
+          title: "Pedido iFood recebido",
+          detail: `${sale.customer?.name ?? "Cliente iFood"} · ${sale.items.map((item) => item.product.name).join(", ") || "Itens do pedido"} · ${decimalString(sale.total)}`,
+          targetTab: "ifood-orders",
+          targetId: sale.id
+        })),
+        ...financialEntries.map((entry) => ({
+          type: "FINANCIAL_DUE" as const,
+          title: entry.direction === "RECEIVABLE" ? "Conta a receber próxima do vencimento" : "Conta a pagar próxima do vencimento",
+          detail: `${entry.partyName ?? entry.description} · ${decimalString(entry.amount)} · vence em ${entry.dueDate.toLocaleDateString("pt-BR")}`,
+          targetTab: entry.direction === "RECEIVABLE" ? "receivables" : "payables",
+          targetId: entry.id
+        })),
+        ...lowStockItems.map((item) => ({
+          type: new Prisma.Decimal(item.quantity).lessThanOrEqualTo(0) ? "OUT_OF_STOCK" as const : "LOW_STOCK" as const,
+          title: new Prisma.Decimal(item.quantity).lessThanOrEqualTo(0)
+            ? `${item.product.name} está sem estoque`
+            : `${item.product.name} está acabando`,
+          detail: `Restam ${decimalString(item.quantity)} ${item.product.unit} em ${item.warehouse.name}.`,
+          product: item.product,
+          warehouse: item.warehouse,
+          quantity: decimalString(item.quantity),
+          targetTab: "inventory",
+          targetId: item.id
+        }))
+      ].slice(0, 10),
       recentSales: recentSales.map((sale) => ({
         ...sale,
         total: decimalString(sale.total)

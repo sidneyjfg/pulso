@@ -27,6 +27,7 @@ const corsOrigins = config.CORS_ORIGINS.split(",").map((origin) => origin.trim()
 
 export async function buildApp() {
   const app = Fastify({
+    bodyLimit: 8 * 1024 * 1024,
     logger: {
       level: config.LOG_LEVEL,
       redact: {

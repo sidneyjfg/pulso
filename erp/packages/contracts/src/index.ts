@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const idSchema = z.string().cuid();
+export const idSchema = z.string().trim().min(3).max(120).regex(/^[A-Za-z0-9_-]+$/, "Informe um ID válido.");
 
 export const paginationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -31,6 +31,10 @@ export const switchContextBodySchema = z.object({
 
 export const listQuerySchema = paginationQuerySchema.extend({
   search: z.string().trim().min(1).max(120).optional()
+});
+
+export const financialEntryListQuerySchema = listQuerySchema.extend({
+  status: z.enum(["ALL", "OPEN", "PAID", "CANCELLED", "OVERDUE"]).default("ALL")
 });
 
 export const adminLoginBodySchema = z.object({
@@ -122,6 +126,11 @@ const moneyStringSchema = z
   .trim()
   .regex(/^\d{1,12}(\.\d{1,2})?$/, "Informe um valor válido.");
 
+const productImageDataUrlSchema = z
+  .string()
+  .max(7_000_000)
+  .regex(/^data:image\/(png|jpe?g);base64,[A-Za-z0-9+/]+={0,2}$/, "Informe uma imagem PNG ou JPG válida.");
+
 export const createCategoryBodySchema = z.object({
   name: z.string().trim().min(2).max(120)
 });
@@ -139,6 +148,8 @@ export const createProductBodySchema = z.object({
   unit: z.string().trim().min(1).max(12).default("UN"),
   costPrice: moneyStringSchema.optional(),
   salePrice: moneyStringSchema,
+  imageDataUrl: productImageDataUrlSchema.optional(),
+  imageFileName: z.string().trim().max(180).optional(),
   barcodes: z.array(z.string().trim().min(4).max(32)).max(20).default([]),
   branchPrices: z
     .array(
@@ -166,6 +177,8 @@ export const updateProductBodySchema = z.object({
   unit: z.string().trim().min(1).max(12).optional(),
   costPrice: moneyStringSchema.nullable().optional(),
   salePrice: moneyStringSchema.optional(),
+  imageDataUrl: productImageDataUrlSchema.nullable().optional(),
+  imageFileName: z.string().trim().max(180).nullable().optional(),
   active: z.boolean().optional()
 });
 
@@ -322,6 +335,19 @@ export const cancelPurchaseBodySchema = z.object({
   reason: z.string().trim().min(3).max(500)
 });
 
+export const settleFinancialEntryBodySchema = z.object({
+  paidAmount: moneyStringSchema.optional(),
+  interestAmount: moneyStringSchema.default("0"),
+  discountAmount: moneyStringSchema.default("0"),
+  paymentMethod: z.enum(["CASH", "CREDIT_CARD", "DEBIT_CARD", "PIX", "BANK_TRANSFER", "VOUCHER", "OTHER"]).optional(),
+  proofUrl: z.string().trim().url().max(2000).optional(),
+  proofFileName: z.string().trim().min(1).max(180).optional()
+});
+
+export const cancelFinancialEntryBodySchema = z.object({
+  reason: z.string().trim().min(3).max(500)
+});
+
 const ufSchema = z.enum([
   "AC",
   "AL",
@@ -385,7 +411,7 @@ export const fiscalPendingQuerySchema = listQuerySchema.extend({
 
 export const createAlertRuleBodySchema = z.object({
   name: z.string().trim().min(2).max(120),
-  type: z.enum(["LOW_STOCK", "OUT_OF_STOCK", "FISCAL_PENDING", "IMPORT_ERROR", "INTEGRATION_ERROR", "SECURITY", "OTHER"]),
+  type: z.enum(["LOW_STOCK", "OUT_OF_STOCK", "IFOOD_ORDER", "FINANCIAL_DUE", "FISCAL_PENDING", "IMPORT_ERROR", "INTEGRATION_ERROR", "SECURITY", "OTHER"]),
   branchId: idSchema.optional(),
   threshold: z.record(z.unknown()).optional()
 });
@@ -401,19 +427,104 @@ export const createImportJobBodySchema = z.object({
 });
 
 export const createIntegrationConnectionBodySchema = z.object({
-  channel: z.enum(["IFOOD", "FOOD99", "MARKETPLACE", "ECOMMERCE", "POS", "API", "OTHER"]),
+  channel: z.literal("IFOOD"),
   branchId: idSchema.optional(),
   externalAccountId: z.string().trim().min(1).max(180).optional()
 });
 
 export const updateIntegrationConnectionBodySchema = z.object({
-  status: z.enum(["DISCONNECTED", "CONNECTED", "ERROR", "PAUSED"]),
-  externalAccountId: z.string().trim().min(1).max(180).nullable().optional()
+  status: z.enum(["DISCONNECTED", "CONNECTED", "ERROR", "PAUSED"]).optional(),
+  externalAccountId: z.string().trim().min(1).max(180).nullable().optional(),
+  ecommerceStockMode: z.enum(["FULL", "PERCENT", "FIXED"]).optional(),
+  ecommerceStockPercent: moneyStringSchema.nullable().optional(),
+  ecommerceStockFixedQuantity: decimalStringSchema.nullable().optional()
 });
 
 export const connectIfoodIntegrationBodySchema = z.object({
   merchantId: z.string().uuid(),
   mode: z.enum(["GROCERIES", "RESTAURANT_PDV"]).default("GROCERIES")
+});
+
+export const startIfoodOauthBodySchema = z.object({
+  mode: z.enum(["GROCERIES", "RESTAURANT_PDV"]).default("GROCERIES")
+});
+
+export const completeIfoodOauthBodySchema = z.object({
+  authorizationCode: z.string().trim().min(4).max(80),
+  authorizationCodeVerifier: z.string().trim().min(16).max(512),
+  merchantId: z.string().uuid().optional(),
+  mode: z.enum(["GROCERIES", "RESTAURANT_PDV"]).default("GROCERIES")
+});
+
+export const ifoodCatalogItemsQuerySchema = listQuerySchema.extend({
+  status: z.enum(["all", "linked", "unlinked"]).default("all")
+});
+
+export const linkIfoodCatalogItemBodySchema = z.object({
+  productId: idSchema
+});
+
+export const createProductFromIfoodItemBodySchema = z.object({
+  categoryId: idSchema.optional(),
+  sku: z.string().trim().min(1).max(64).optional(),
+  name: z.string().trim().min(2).max(180).optional(),
+  description: z.string().trim().max(2000).optional(),
+  unit: z.string().trim().min(1).max(12).default("UN"),
+  costPrice: moneyStringSchema.optional(),
+  salePrice: moneyStringSchema.optional(),
+  barcode: z.string().trim().min(4).max(32).optional()
+});
+
+export const ifoodOrderActionBodySchema = z.object({
+  action: z.enum(["START_PREPARATION", "READY_TO_PICKUP", "DISPATCH"])
+});
+
+const ifoodOrderItemSchema = z.object({
+  productId: idSchema,
+  quantity: positiveDecimalStringSchema,
+  unitPrice: moneyStringSchema,
+  discount: moneyStringSchema.default("0")
+});
+
+const ifoodOrderEventSchema = z.object({
+  externalEventId: z.string().trim().min(1).max(180),
+  eventType: z.string().trim().min(1).max(120),
+  occurredAt: z.coerce.date().optional(),
+  order: z.object({
+    externalOrderId: z.string().trim().min(1).max(180),
+    status: z.enum(["PLACED", "CONFIRMED", "CANCELLED"]).default("CONFIRMED"),
+    warehouseId: idSchema.optional(),
+    cancelReason: z.string().trim().min(3).max(500).optional(),
+    customer: z
+      .object({
+        name: z.string().trim().min(2).max(180).optional(),
+        document: z.string().trim().regex(/^\d{11}$|^\d{14}$/).optional(),
+        email: z.string().trim().email().max(254).optional()
+      })
+      .optional(),
+    items: z.array(ifoodOrderItemSchema).min(1).max(200)
+  })
+});
+
+const officialIfoodOrderEventSchema = z
+  .object({
+    id: z.string().trim().min(1).max(180),
+    code: z.string().trim().min(1).max(120),
+    fullCode: z.string().trim().min(1).max(180).optional(),
+    orderId: z.string().trim().min(1).max(180),
+    merchantId: z.string().trim().min(1).max(180).optional(),
+    createdAt: z.coerce.date().optional(),
+    metadata: z.unknown().optional()
+  })
+  .passthrough();
+
+export const ingestIfoodOrderEventsBodySchema = z.object({
+  events: z.array(z.union([officialIfoodOrderEventSchema, ifoodOrderEventSchema])).min(1).max(100),
+  acknowledge: z.boolean().default(true)
+});
+
+export const reprocessIfoodOrderEventsBodySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25)
 });
 
 export const createReportJobBodySchema = z.object({
@@ -504,6 +615,8 @@ export type CancelSaleBody = z.infer<typeof cancelSaleBodySchema>;
 export type CreatePurchaseBody = z.infer<typeof createPurchaseBodySchema>;
 export type ReceivePurchaseBody = z.infer<typeof receivePurchaseBodySchema>;
 export type CancelPurchaseBody = z.infer<typeof cancelPurchaseBodySchema>;
+export type SettleFinancialEntryBody = z.infer<typeof settleFinancialEntryBodySchema>;
+export type CancelFinancialEntryBody = z.infer<typeof cancelFinancialEntryBodySchema>;
 export type UpsertCompanyFiscalProfileBody = z.infer<typeof upsertCompanyFiscalProfileBodySchema>;
 export type UpsertProductFiscalProfileBody = z.infer<typeof upsertProductFiscalProfileBodySchema>;
 export type FiscalPendingQuery = z.infer<typeof fiscalPendingQuerySchema>;
@@ -513,6 +626,10 @@ export type CreateImportJobBody = z.infer<typeof createImportJobBodySchema>;
 export type CreateIntegrationConnectionBody = z.infer<typeof createIntegrationConnectionBodySchema>;
 export type UpdateIntegrationConnectionBody = z.infer<typeof updateIntegrationConnectionBodySchema>;
 export type ConnectIfoodIntegrationBody = z.infer<typeof connectIfoodIntegrationBodySchema>;
+export type StartIfoodOauthBody = z.infer<typeof startIfoodOauthBodySchema>;
+export type CompleteIfoodOauthBody = z.infer<typeof completeIfoodOauthBodySchema>;
+export type IngestIfoodOrderEventsBody = z.infer<typeof ingestIfoodOrderEventsBodySchema>;
+export type ReprocessIfoodOrderEventsBody = z.infer<typeof reprocessIfoodOrderEventsBodySchema>;
 export type CreateReportJobBody = z.infer<typeof createReportJobBodySchema>;
 export type CreateTaxRuleBody = z.infer<typeof createTaxRuleBodySchema>;
 export type UpdateTaxRuleBody = z.infer<typeof updateTaxRuleBodySchema>;

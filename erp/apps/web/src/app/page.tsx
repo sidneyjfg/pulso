@@ -22,8 +22,10 @@ import {
   Eye,
   FileText,
   Gauge,
+  ImageIcon,
   Layers3,
   Landmark,
+  Pencil,
   Loader2,
   LogOut,
   Menu,
@@ -31,6 +33,7 @@ import {
   PackagePlus,
   Plug,
   ReceiptText,
+  RefreshCw,
   Search,
   Settings,
   ShieldCheck,
@@ -46,7 +49,7 @@ import {
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import {
@@ -57,6 +60,11 @@ import {
   createImportJob,
   createIntegrationConnection,
   createInventoryCount,
+  cancelPurchase,
+  cancelFinancialEntry,
+  cancelSale,
+  completeIfoodOauth,
+  createProductFromIfoodItem,
   createPurchase,
   createReportJob,
   createSale,
@@ -67,6 +75,11 @@ import {
   getBranches,
   getCategories,
   getDashboard,
+  getIfoodCatalogItems,
+  getIfoodOrders,
+  getIfoodPendingItems,
+  getIfoodSaleExternalDetails,
+  getIfoodIntegrationHealth,
   getCustomers,
   getMe,
   getPaginatedResource,
@@ -80,10 +93,21 @@ import {
   login,
   logoutSession,
   register,
+  linkIfoodCatalogItem,
+  pollIfoodEvents,
+  reprocessIfoodEvents,
+  resolveIfoodPendingItem,
+  receivePurchase,
+  settleFinancialEntry,
   refreshSession,
+  startIfoodOauth,
+  syncIfoodCatalog,
+  runIfoodOrderAction,
   upsertProductFiscalProfile,
   updatePricingSettings,
   updateCategoryActive,
+  updateIntegrationConnection,
+  updateProduct,
   updateProductActive,
   switchContext,
   updateUserAccess,
@@ -93,6 +117,7 @@ import {
   type DashboardResponse,
   type GenericListItem,
   type GenericListResponse,
+  type IfoodOauthStartResponse,
   type LoginBody,
   type LoginResponse,
   type MeResponse,
@@ -493,7 +518,7 @@ function MarketingHome({ onLoggedIn }: { onLoggedIn: (session: LoginResponse) =>
     {
       icon: Layers3,
       title: "Pronto para canais",
-      description: "A base já nasce preparada para iFood, 99Food, PDV, e-commerce e marketplaces."
+      description: "A base já nasce preparada para integração iFood com operação simples, sincronização de catálogo e pedidos."
     }
   ];
 
@@ -1023,6 +1048,7 @@ type DashboardTab =
   | "suppliers"
   | "categories"
   | "sales"
+  | "sales-history"
   | "payments"
   | "receivables"
   | "payables"
@@ -1033,6 +1059,9 @@ type DashboardTab =
   | "imports"
   | "integrations"
   | "channels"
+  | "ifood-catalog"
+  | "ifood-pending"
+  | "ifood-orders"
   | "reports"
   | "users"
   | "settings"
@@ -1047,6 +1076,7 @@ type SidebarItem = {
   href?: string;
   badge?: string;
   status?: "available" | "foundation" | "soon";
+  requiresIfood?: boolean;
 };
 
 type AppAlert = {
@@ -1069,7 +1099,33 @@ type DetailsDialogState = {
   variant?: "product";
 };
 
+type IfoodOauthDialogState = IfoodOauthStartResponse & {
+  connectionId: string;
+};
+
+type IfoodStockSettingsDialogState = {
+  connection: GenericListItem;
+};
+
+type IfoodCatalogLinkDialogState = {
+  item: GenericListItem;
+  source: "catalog" | "pending";
+};
+type IfoodOrdersView = "orders" | "pending" | "logs";
+type IfoodOrderStatusFilter = "ALL" | "PENDING" | "RESERVED" | "PREPARATION_STARTED" | "READY_TO_PICKUP" | "DISPATCHED" | "COMPLETED" | "CANCELLED";
+
 type ProductItem = ProductListResponse["data"][number];
+type ProductEditInput = {
+  sku: string;
+  name: string;
+  unit: string;
+  salePrice: string;
+  costPrice?: string | null;
+  categoryId?: string | null;
+  imageDataUrl?: string | null;
+  imageFileName?: string | null;
+};
+type SalePaymentMethod = "CASH" | "CREDIT_CARD" | "DEBIT_CARD" | "PIX" | "BANK_TRANSFER" | "VOUCHER" | "OTHER";
 type UserItem = UserListResponse["data"][number];
 type ProductFiscalProfileInput = {
   ncm?: string;
@@ -1080,6 +1136,64 @@ type ProductFiscalProfileInput = {
   pisCst?: string;
   cofinsCst?: string;
 };
+
+const salePaymentOptions: Array<{ value: SalePaymentMethod; label: string }> = [
+  { value: "PIX", label: "PIX" },
+  { value: "CASH", label: "Dinheiro" },
+  { value: "DEBIT_CARD", label: "Cartão de débito" },
+  { value: "CREDIT_CARD", label: "Cartão de crédito" },
+  { value: "VOUCHER", label: "Voucher" },
+  { value: "BANK_TRANSFER", label: "Transferência" },
+  { value: "OTHER", label: "Outro" }
+];
+
+function productIfoodReadiness(product: ProductItem) {
+  const issues: string[] = [];
+  const salePrice = Number(product.branchPrices[0]?.salePrice ?? product.salePrice);
+
+  if (!product.active) {
+    issues.push("Produto inativo");
+  }
+  if (!product.category) {
+    issues.push("Sem categoria");
+  }
+  if (!product.barcodes[0]?.barcode) {
+    issues.push("Sem EAN");
+  }
+  if (!Number.isFinite(salePrice) || salePrice <= 0) {
+    issues.push("Preço inválido");
+  }
+
+  return {
+    ready: issues.length === 0,
+    issues
+  };
+}
+
+function readProductImageFile(file: File) {
+  return new Promise<{ imageDataUrl: string; imageFileName: string }>((resolve, reject) => {
+    const allowedTypes = new Set(["image/png", "image/jpeg"]);
+    if (!allowedTypes.has(file.type)) {
+      reject(new Error("Use uma imagem PNG ou JPG."));
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      reject(new Error("A imagem deve ter no máximo 5 MB."));
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Não foi possível ler a imagem."));
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Não foi possível ler a imagem."));
+        return;
+      }
+      resolve({ imageDataUrl: reader.result, imageFileName: file.name });
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 type SettingsState = {
   darkMode: boolean;
@@ -1125,6 +1239,7 @@ const tabRoutes: Record<DashboardTab, string> = {
   alerts: "/app/alertas",
   "global-search": "/app/busca",
   sales: "/app/vendas",
+  "sales-history": "/app/historico-vendas",
   payments: "/app/pagamentos",
   receivables: "/app/contas-a-receber",
   payables: "/app/contas-a-pagar",
@@ -1142,6 +1257,9 @@ const tabRoutes: Record<DashboardTab, string> = {
   imports: "/app/migracao",
   integrations: "/app/integracoes",
   channels: "/app/canais",
+  "ifood-catalog": "/app/catalogo-ifood",
+  "ifood-pending": "/app/pendencias-ifood",
+  "ifood-orders": "/app/pedidos-ifood",
   reports: "/app/relatorios",
   users: "/app/usuarios"
 };
@@ -1296,92 +1414,272 @@ function ConfirmDialog({ action, onClose }: { action: ConfirmAction | null; onCl
   );
 }
 
-function PricingInsightDialog({
-  product,
-  pricingConfig,
-  onClose
+function IfoodOauthDialog({
+  state,
+  isSaving,
+  onClose,
+  onComplete
 }: {
-  product: ProductItem | null;
-  pricingConfig: PricingConfig;
+  state: IfoodOauthDialogState | null;
+  isSaving: boolean;
   onClose: () => void;
+  onComplete: (authorizationCode: string) => void;
 }) {
-  if (!product) {
+  const [authorizationCode, setAuthorizationCode] = useState("");
+
+  useEffect(() => {
+    if (state) {
+      setAuthorizationCode("");
+    }
+  }, [state]);
+
+  if (!state) {
     return null;
   }
 
-  const analysis = analyzePricing(product, pricingConfig);
-  const statusContent = {
-    good: {
-      title: "Preço saudável",
-      description: "A margem estimada está confortável para uma operação pequena.",
-      className: "border-emerald-200 bg-emerald-50 text-emerald-800"
-    },
-    attention: {
-      title: "Preço no limite",
-      description: "A margem existe, mas pode apertar com perdas, descontos ou taxas maiores.",
-      className: "border-amber-200 bg-amber-50 text-amber-800"
-    },
-    bad: {
-      title: "Preço perigoso",
-      description: "A margem estimada está baixa. Revise custo, preço de venda ou taxas.",
-      className: "border-red-200 bg-red-50 text-red-700"
-    },
-    unknown: {
-      title: "Informe o custo",
-      description: "Sem custo de compra, o Pulso não consegue estimar lucro líquido.",
-      className: "border-slate-200 bg-slate-50 text-slate-700"
-    }
-  }[analysis.status];
+  const trimmedCode = authorizationCode.trim();
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/55 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="pricing-title">
-      <section className="auth-card-enter w-full max-w-lg rounded-xl border border-white/20 bg-white p-5 text-slate-950 shadow-2xl shadow-slate-950/30">
-        <div className="flex items-start gap-3">
-          <LogoMark className="h-10 w-10" />
-          <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Precificacao</p>
-            <h2 id="pricing-title" className="mt-1 truncate text-xl font-semibold tracking-normal">{product.name}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">{product.sku} · {product.unit}</p>
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="ifood-oauth-title">
+      <section className="auth-card-enter w-full max-w-lg rounded-lg border border-border bg-white p-5 text-slate-950 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">iFood</p>
+            <h2 id="ifood-oauth-title" className="mt-1 text-lg font-semibold tracking-normal">Conectar iFood</h2>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              Depois de aceitar no Portal iFood, cole aqui o código exibido para finalizar.
+            </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Fechar precificacao"
-            className="rounded-md p-2 text-muted-foreground transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-slate-100 hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-          >
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar autorização iFood">
             <X aria-hidden="true" size={18} />
           </button>
         </div>
 
-        <div className={`mt-5 rounded-lg border p-4 ${statusContent.className}`}>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold">{statusContent.title}</p>
-              <p className="mt-1 text-sm leading-6 opacity-85">{statusContent.description}</p>
-            </div>
-            <p className="text-3xl font-semibold tabular-nums">{analysis.status === "unknown" ? "--" : `${analysis.netMargin.toFixed(1)}%`}</p>
-          </div>
+        <div className="mt-5 rounded-md border border-border bg-slate-50 p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Código para ativar no iFood</p>
+          <p className="mt-2 text-2xl font-semibold tracking-normal text-slate-950">{state.userCode}</p>
         </div>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        <label className="mt-4 block">
+          <span className="text-sm font-medium text-slate-950">Código gerado pelo iFood</span>
+          <input
+            value={authorizationCode}
+            onChange={(event) => setAuthorizationCode(event.target.value.toUpperCase())}
+            placeholder="Ex.: MPNG-MFSH"
+            className="mt-2 w-full rounded-md border border-border bg-white px-3 py-2 text-sm font-medium tracking-normal text-slate-950 outline-none transition-colors placeholder:text-muted-foreground focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500"
+            autoFocus
+          />
+        </label>
+
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          <a
+            href={state.verificationUrlComplete}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            Abrir Portal iFood
+          </a>
+          <button
+            type="button"
+            disabled={!trimmedCode || isSaving}
+            onClick={() => onComplete(trimmedCode)}
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] duration-150 ease-[var(--ease-out)] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Check aria-hidden="true" size={16} />}
+            Conectar loja
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function IfoodStockSettingsDialog({
+  state,
+  isSaving,
+  onClose,
+  onSave
+}: {
+  state: IfoodStockSettingsDialogState | null;
+  isSaving: boolean;
+  onClose: () => void;
+  onSave: (input: { ecommerceStockMode: "FULL" | "PERCENT" | "FIXED"; ecommerceStockPercent?: string | null; ecommerceStockFixedQuantity?: string | null }) => void;
+}) {
+  const connection = state?.connection;
+  const [mode, setMode] = useState<"FULL" | "PERCENT" | "FIXED">("FULL");
+  const [percent, setPercent] = useState("");
+  const [fixedQuantity, setFixedQuantity] = useState("");
+
+  useEffect(() => {
+    if (!connection) {
+      return;
+    }
+    const currentMode = textValue(connection.ecommerceStockMode, "FULL");
+    setMode(currentMode === "PERCENT" || currentMode === "FIXED" ? currentMode : "FULL");
+    setPercent(textValue(connection.ecommerceStockPercent, ""));
+    setFixedQuantity(textValue(connection.ecommerceStockFixedQuantity, ""));
+  }, [connection]);
+
+  if (!connection) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="ifood-stock-title">
+      <section className="auth-card-enter w-full max-w-lg rounded-lg border border-border bg-white p-5 text-slate-950 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">iFood</p>
+            <h2 id="ifood-stock-title" className="mt-1 text-lg font-semibold tracking-normal">Estoque para ecommerce</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">Escolha quanto do estoque desta loja fica disponível para venda no iFood.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar configuração">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+
+        <div className="mt-5 grid gap-3">
+          <label className="grid gap-1 text-sm font-medium text-slate-950">
+            Modo
+            <select value={mode} onChange={(event) => setMode(event.target.value as "FULL" | "PERCENT" | "FIXED")} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+              <option value="FULL">Usar todo o estoque disponível</option>
+              <option value="PERCENT">Separar uma porcentagem para o iFood</option>
+              <option value="FIXED">Separar uma quantidade máxima</option>
+            </select>
+          </label>
+          {mode === "PERCENT" ? (
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Porcentagem do estoque para o iFood
+              <input value={percent} onChange={(event) => setPercent(event.target.value)} placeholder="20" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+          ) : null}
+          {mode === "FIXED" ? (
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Máximo de unidades para o iFood
+              <input value={fixedQuantity} onChange={(event) => setFixedQuantity(event.target.value)} placeholder="15" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+          ) : null}
+        </div>
+
+        <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={() =>
+              onSave({
+                ecommerceStockMode: mode,
+                ecommerceStockPercent: mode === "PERCENT" ? percent.trim() || "0" : null,
+                ecommerceStockFixedQuantity: mode === "FIXED" ? fixedQuantity.trim() || "0" : null
+              })
+            }
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Check aria-hidden="true" size={16} />}
+            Salvar
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function IfoodCatalogLinkDialog({
+  state,
+  products,
+  categories,
+  isSaving,
+  onClose,
+  onLink,
+  onCreate
+}: {
+  state: IfoodCatalogLinkDialogState | null;
+  products: ProductListResponse["data"];
+  categories: CategoryListResponse["data"];
+  isSaving: boolean;
+  onClose: () => void;
+  onLink: (productId: string) => void;
+  onCreate: (categoryId?: string) => void;
+}) {
+  const [productId, setProductId] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const item = state?.item;
+  const isPendingResolution = state?.source === "pending";
+
+  useEffect(() => {
+    setProductId("");
+    setCategoryId("");
+  }, [item]);
+
+  if (!item) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="ifood-catalog-link-title">
+      <section className="auth-card-enter w-full max-w-2xl rounded-lg border border-border bg-white p-5 text-slate-950 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Item iFood</p>
+            <h2 id="ifood-catalog-link-title" className="mt-1 text-lg font-semibold tracking-normal">{textValue(item.name, "Item iFood")}</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">Vincule este item a um produto existente ou crie um produto no ERP com os dados do iFood.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar vínculo">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-3">
           {[
-            ["Preço de venda", money(analysis.salePrice)],
-            ["Custo informado", analysis.costPrice ? money(analysis.costPrice) : "Sem custo"],
-            [`Impostos estimados (${analysis.taxPercent}%)`, money(analysis.salePrice * (analysis.taxPercent / 100))],
-            [`Taxas estimadas (${analysis.feePercent}%)`, money(analysis.salePrice * (analysis.feePercent / 100))],
-            ["Lucro líquido estimado", analysis.status === "unknown" ? "Sem cálculo" : money(analysis.netProfit)],
-            ["Markup sobre custo", analysis.status === "unknown" ? "Sem cálculo" : `${analysis.markup.toFixed(1)}%`]
+            ["Código", textValue(item.externalCode, "-")],
+            ["Item ID", textValue(item.ifoodItemId, "-")],
+            ["Preço", money(textValue(item.price, "0"))]
           ].map(([label, value]) => (
-            <article key={label} className="rounded-lg border border-border bg-slate-50 p-3">
+            <article key={label} className="min-w-0 rounded-md border border-border bg-slate-50 p-3">
               <p className="text-xs text-muted-foreground">{label}</p>
-              <p className="mt-1 text-base font-semibold tabular-nums text-slate-950">{value}</p>
+              <p className="mt-1 break-words font-mono text-sm text-slate-950">{value}</p>
             </article>
           ))}
         </div>
 
-        <p className="mt-4 text-xs leading-5 text-muted-foreground">
-          Estimativa operacional: usa custo do produto, preço da loja, {analysis.taxPercent}% de impostos e {analysis.feePercent}% de taxas. Não substitui cálculo fiscal/contábil.
-        </p>
+        <div className={`mt-5 grid gap-4 ${isPendingResolution ? "" : "lg:grid-cols-2"}`}>
+          <section className="rounded-lg border border-border p-3">
+            <h3 className="text-sm font-semibold text-slate-950">Vincular produto existente</h3>
+            <label className="mt-3 grid gap-1 text-sm font-medium text-slate-950">
+              Produto ERP
+              <select value={productId} onChange={(event) => setProductId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                <option value="">Selecione...</option>
+                {products.map((product) => (
+                  <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" disabled={isSaving || !productId} onClick={() => onLink(productId)} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-slate-800 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500">
+              {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Plug aria-hidden="true" size={16} />}
+              Vincular
+            </button>
+          </section>
+
+          {!isPendingResolution ? <section className="rounded-lg border border-border p-3">
+            <h3 className="text-sm font-semibold text-slate-950">Criar produto no ERP</h3>
+            <label className="mt-3 grid gap-1 text-sm font-medium text-slate-950">
+              Categoria
+              <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                <option value="">Sem categoria</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>{category.name}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" disabled={isSaving} onClick={() => onCreate(categoryId || undefined)} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <PackagePlus aria-hidden="true" size={16} />}
+              Criar e vincular
+            </button>
+          </section> : null}
+        </div>
       </section>
     </div>
   );
@@ -1415,8 +1713,12 @@ function DetailsDialog({
         <div className="max-h-[70vh] overflow-y-auto p-5">
           {details.variant === "product" && isProductDetailsData(details.data) ? (
             <ProductDetailsContent product={details.data} pricingConfig={pricingConfig} />
+          ) : textValue(asRecord(details.data)?.kind) === "IFOOD_EVENT" ? (
+            <IfoodEventDetailsContent event={details.data} />
+          ) : textValue(asRecord(details.data)?.source) === "IFOOD" ? (
+            <IfoodOrderDetailsContent order={details.data} />
           ) : (
-            <pre className="overflow-x-auto rounded-md border border-border bg-slate-50 p-4 text-xs text-slate-700">{JSON.stringify(details.data, null, 2)}</pre>
+            <ReadableDetailsContent data={details.data} />
           )}
         </div>
       </div>
@@ -1627,6 +1929,7 @@ function PeopleDirectorySection({
     data: PersonListResponse | undefined;
     isLoading: boolean;
     isFetching: boolean;
+    error: Error | null;
   };
   searchDraft: string;
   onSearchDraftChange: (value: string) => void;
@@ -1681,6 +1984,7 @@ function PeopleDirectorySection({
 
       <div className="divide-y divide-border">
         {query.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando...</p> : null}
+        {query.error ? <p className="px-4 py-5 text-sm text-red-600">{query.error.message}</p> : null}
         {query.data?.data.map((person) => (
           <article key={person.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_150px_190px_220px] lg:items-center">
             <div className="min-w-0">
@@ -1901,6 +2205,8 @@ function ProductCreateDialog({
     salePrice: string;
     costPrice?: string;
     categoryId?: string;
+    imageDataUrl?: string;
+    imageFileName?: string;
     barcodes: string[];
     initialStock?: { warehouseId: string; quantity: string };
     fiscalProfile?: ProductFiscalProfileInput;
@@ -1915,6 +2221,9 @@ function ProductCreateDialog({
   const [newCategoryName, setNewCategoryName] = useState("");
   const [createdCategories, setCreatedCategories] = useState<Array<{ id: string; name: string; active: boolean }>>([]);
   const [barcode, setBarcode] = useState("");
+  const [imageDataUrl, setImageDataUrl] = useState("");
+  const [imageFileName, setImageFileName] = useState("");
+  const [imageError, setImageError] = useState("");
   const [initialQuantity, setInitialQuantity] = useState("");
   const [initialWarehouseId, setInitialWarehouseId] = useState("");
   const [ncm, setNcm] = useState("");
@@ -1951,9 +2260,9 @@ function ProductCreateDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-product-title">
-      <div className="auth-card-enter w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
-        <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+    <div className="custom-scrollbar fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-product-title">
+      <div className="auth-card-enter flex max-h-[calc(100svh-2rem)] min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
+        <div className="shrink-0 flex items-start justify-between gap-4 border-b border-border px-5 py-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Cadastro</p>
             <h2 id="create-product-title" className="mt-1 text-lg font-semibold text-slate-950">Novo produto</h2>
@@ -1964,7 +2273,7 @@ function ProductCreateDialog({
         </div>
 
         <form
-          className="grid gap-4 p-5"
+          className="custom-scrollbar grid min-h-0 gap-4 overflow-y-auto p-5 [scrollbar-gutter:stable]"
           onSubmit={(event) => {
             event.preventDefault();
             onSave({
@@ -1974,6 +2283,7 @@ function ProductCreateDialog({
               salePrice: salePrice.trim(),
               ...(costPrice.trim() ? { costPrice: costPrice.trim() } : {}),
               ...(categoryId ? { categoryId } : {}),
+              ...(imageDataUrl ? { imageDataUrl, imageFileName } : {}),
               barcodes: barcode.trim() ? [barcode.trim()] : [],
               ...(initialQuantity.trim() && initialWarehouseId
                 ? {
@@ -2019,6 +2329,61 @@ function ProductCreateDialog({
               Nome
               <input value={name} onChange={(event) => setName(event.target.value)} required placeholder="Ex: Coca-Cola 2L" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
             </label>
+            <div className="grid gap-2 text-sm font-medium text-slate-950 sm:col-span-2">
+              Foto do produto
+              <div className="flex flex-col gap-3 rounded-lg border border-border bg-slate-50 p-3 sm:flex-row sm:items-center">
+                <div className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-white">
+                  {imageDataUrl ? (
+                    <img src={imageDataUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <ImageIcon aria-hidden="true" size={24} className="text-slate-400" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap gap-2">
+                    <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-within:ring-2 focus-within:ring-emerald-500">
+                      <Upload aria-hidden="true" size={15} />
+                      Selecionar foto
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg"
+                        className="sr-only"
+                        onChange={async (event) => {
+                          const file = event.target.files?.[0];
+                          event.currentTarget.value = "";
+                          if (!file) {
+                            return;
+                          }
+                          try {
+                            const image = await readProductImageFile(file);
+                            setImageDataUrl(image.imageDataUrl);
+                            setImageFileName(image.imageFileName);
+                            setImageError("");
+                          } catch (error) {
+                            setImageError(error instanceof Error ? error.message : "Imagem inválida.");
+                          }
+                        }}
+                      />
+                    </label>
+                    {imageDataUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImageDataUrl("");
+                          setImageFileName("");
+                          setImageError("");
+                        }}
+                        className="rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-100 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        Remover
+                      </button>
+                    ) : null}
+                  </div>
+                  <p className="mt-2 truncate text-xs font-normal text-muted-foreground">{imageFileName || "PNG ou JPG até 5 MB. A foto será enviada ao iFood na sincronização."}</p>
+                  {imageError ? <p className="mt-1 text-xs font-normal text-red-600">{imageError}</p> : null}
+                </div>
+              </div>
+            </div>
             <label className="grid gap-1 text-sm font-medium text-slate-950">
               Preço de venda
               <input value={salePrice} onChange={(event) => setSalePrice(event.target.value)} required placeholder="12.90" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
@@ -2136,7 +2501,7 @@ function ProductCreateDialog({
             </div>
           </div>
 
-          <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-end">
+          <div className="sticky bottom-0 -mx-5 -mb-5 flex flex-col-reverse gap-2 border-t border-border bg-white px-5 py-4 sm:flex-row sm:justify-end">
             <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
               Cancelar
             </button>
@@ -2151,23 +2516,233 @@ function ProductCreateDialog({
   );
 }
 
+function ProductEditDialog({
+  product,
+  categories,
+  isSaving,
+  onClose,
+  onSave
+}: {
+  product: ProductItem | null;
+  categories: CategoryListResponse["data"];
+  isSaving: boolean;
+  onClose: () => void;
+  onSave: (input: ProductEditInput) => void;
+}) {
+  const [sku, setSku] = useState("");
+  const [name, setName] = useState("");
+  const [unit, setUnit] = useState("UN");
+  const [salePrice, setSalePrice] = useState("");
+  const [costPrice, setCostPrice] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const [imageDataUrl, setImageDataUrl] = useState("");
+  const [imageFileName, setImageFileName] = useState("");
+  const [imageChanged, setImageChanged] = useState(false);
+  const [imageError, setImageError] = useState("");
+
+  useEffect(() => {
+    if (!product) {
+      return;
+    }
+    setSku(product.sku);
+    setName(product.name);
+    setUnit(product.unit || "UN");
+    setSalePrice(product.branchPrices[0]?.salePrice ?? product.salePrice);
+    setCostPrice(product.costPrice ?? "");
+    setCategoryId(product.category?.id ?? "");
+    setImageDataUrl(product.imageDataUrl ?? "");
+    setImageFileName(product.imageFileName ?? "");
+    setImageChanged(false);
+    setImageError("");
+  }, [product]);
+
+  if (!product) {
+    return null;
+  }
+
+  return (
+    <div className="custom-scrollbar fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="edit-product-title">
+      <div className="auth-card-enter flex max-h-[calc(100svh-2rem)] min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
+        <div className="shrink-0 flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Produto</p>
+            <h2 id="edit-product-title" className="mt-1 text-lg font-semibold text-slate-950">Editar produto</h2>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar edição de produto">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+
+        <form
+          className="custom-scrollbar grid min-h-0 gap-4 overflow-y-auto p-5 [scrollbar-gutter:stable]"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave({
+              sku: sku.trim(),
+              name: name.trim(),
+              unit: unit.trim() || "UN",
+              salePrice: salePrice.trim(),
+              costPrice: costPrice.trim() ? costPrice.trim() : null,
+              categoryId: categoryId || null,
+              ...(imageChanged ? { imageDataUrl: imageDataUrl || null, imageFileName: imageFileName || null } : {})
+            });
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              SKU
+              <input value={sku} onChange={(event) => setSku(event.target.value)} required className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Unidade
+              <input value={unit} onChange={(event) => setUnit(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950 sm:col-span-2">
+              Nome
+              <input value={name} onChange={(event) => setName(event.target.value)} required className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Preço de venda
+              <input value={salePrice} onChange={(event) => setSalePrice(event.target.value)} required className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Preço de custo
+              <input value={costPrice} onChange={(event) => setCostPrice(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950 sm:col-span-2">
+              Categoria
+              <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                <option value="">Sem categoria</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid gap-2 text-sm font-medium text-slate-950">
+            Foto do produto
+            <div className="flex flex-col gap-3 rounded-lg border border-border bg-slate-50 p-3 sm:flex-row sm:items-center">
+              <div className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-white">
+                {imageDataUrl ? <img src={imageDataUrl} alt="" className="h-full w-full object-cover" /> : <ImageIcon aria-hidden="true" size={24} className="text-slate-400" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap gap-2">
+                  <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-within:ring-2 focus-within:ring-emerald-500">
+                    <Upload aria-hidden="true" size={15} />
+                    Trocar foto
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg"
+                      className="sr-only"
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        event.currentTarget.value = "";
+                        if (!file) {
+                          return;
+                        }
+                        try {
+                          const image = await readProductImageFile(file);
+                          setImageDataUrl(image.imageDataUrl);
+                          setImageFileName(image.imageFileName);
+                          setImageChanged(true);
+                          setImageError("");
+                        } catch (error) {
+                          setImageError(error instanceof Error ? error.message : "Imagem inválida.");
+                        }
+                      }}
+                    />
+                  </label>
+                  {imageDataUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImageDataUrl("");
+                        setImageFileName("");
+                        setImageChanged(true);
+                        setImageError("");
+                      }}
+                      className="rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-100 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      Remover
+                    </button>
+                  ) : null}
+                </div>
+                <p className="mt-2 truncate text-xs font-normal text-muted-foreground">{imageFileName || "PNG ou JPG até 5 MB."}</p>
+                {imageError ? <p className="mt-1 text-xs font-normal text-red-600">{imageError}</p> : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="sticky bottom-0 -mx-5 -mb-5 flex flex-col-reverse gap-2 border-t border-border bg-white px-5 py-4 sm:flex-row sm:justify-end">
+            <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              Cancelar
+            </button>
+            <button type="submit" disabled={isSaving} className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Check aria-hidden="true" size={16} />}
+              Salvar alterações
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function SalesPdvSection({
   products,
   warehouses,
+  productsIsLoading,
+  productsIsFetching,
+  productsError,
+  warehousesIsLoading,
+  warehousesError,
+  searchDraft,
+  onSearchDraftChange,
+  onApplySearch,
+  onClearSearch,
+  page,
+  hasNextPage,
+  hasPreviousPage,
+  onNextPage,
+  onPreviousPage,
+  resetKey,
   isCreating,
   onCreateSale
 }: {
   products: ProductListResponse["data"];
   warehouses: Array<{ id: string; name: string }>;
+  productsIsLoading: boolean;
+  productsIsFetching: boolean;
+  productsError: Error | null;
+  warehousesIsLoading: boolean;
+  warehousesError: Error | null;
+  searchDraft: string;
+  onSearchDraftChange: (value: string) => void;
+  onApplySearch: () => void;
+  onClearSearch: () => void;
+  page: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  onNextPage: () => void;
+  onPreviousPage: () => void;
+  resetKey: number;
   isCreating: boolean;
-  onCreateSale: (input: { warehouseId: string; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => void;
+  onCreateSale: (input: { warehouseId: string; paymentMethod: SalePaymentMethod; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => void;
 }) {
   const [selectedWarehouseId, setSelectedWarehouseId] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<SalePaymentMethod>("PIX");
   const [cart, setCart] = useState<Array<{ productId: string; name: string; unitPrice: string; quantity: number }>>([]);
 
   useEffect(() => {
-    setSelectedWarehouseId((current) => current || warehouses[0]?.id || "");
+    setSelectedWarehouseId((current) => (warehouses.some((warehouse) => warehouse.id === current) ? current : warehouses[0]?.id || ""));
   }, [warehouses]);
+
+  useEffect(() => {
+    setCart([]);
+  }, [resetKey]);
 
   const total = useMemo(
     () =>
@@ -2176,8 +2751,12 @@ function SalesPdvSection({
       }, 0),
     [cart]
   );
+  const selectedWarehouseIsValid = warehouses.some((warehouse) => warehouse.id === selectedWarehouseId);
 
   function addProduct(product: ProductItem) {
+    if (!product.active) {
+      return;
+    }
     const unitPrice = product.branchPrices[0]?.salePrice ?? product.salePrice;
     setCart((current) => {
       const existing = current.find((item) => item.productId === product.id);
@@ -2192,34 +2771,109 @@ function SalesPdvSection({
     <section className="grid gap-4 lg:grid-cols-[1.3fr_1fr]">
       <article className="rounded-lg border border-border bg-white">
         <div className="border-b border-border px-4 py-3">
-          <h2 className="text-base font-semibold">PDV - Produtos</h2>
-          <p className="text-sm text-muted-foreground">Selecione produtos para montar a venda.</p>
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <h2 className="text-base font-semibold">PDV - Produtos</h2>
+              <p className="text-sm text-muted-foreground">Busque por nome, SKU ou código de barras e adicione ao carrinho.</p>
+            </div>
+            <form
+              className="w-full min-w-0 xl:max-w-xl"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onApplySearch();
+              }}
+            >
+              <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm focus-within:ring-2 focus-within:ring-emerald-500">
+                <Search aria-hidden="true" size={16} className="text-muted-foreground" />
+                <input
+                  value={searchDraft}
+                  onChange={(event) => onSearchDraftChange(event.target.value)}
+                  maxLength={120}
+                  placeholder="Buscar por nome, SKU ou EAN..."
+                  className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+                />
+                {searchDraft ? (
+                  <button type="button" onClick={onClearSearch} className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950" aria-label="Limpar busca">
+                    <X aria-hidden="true" size={14} />
+                  </button>
+                ) : null}
+              </label>
+            </form>
+          </div>
         </div>
         <div className="divide-y divide-border">
+          {productsIsLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando produtos do PDV...</p> : null}
+          {productsError ? <p className="px-4 py-5 text-sm text-red-600">{productsError.message}</p> : null}
           {products.map((product) => (
-            <div key={product.id} className="flex items-center justify-between gap-3 px-4 py-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-slate-950">{product.name}</p>
-                <p className="text-xs text-muted-foreground">{product.sku}</p>
+            <div key={product.id} className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-slate-50">
+                  {product.imageDataUrl ? (
+                    <img src={product.imageDataUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <ImageIcon aria-hidden="true" size={18} className="text-slate-400" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-medium text-slate-950">{product.name}</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {product.sku} · {product.barcodes[0]?.barcode ?? "Sem EAN"} · {product.category?.name ?? "Sem categoria"}
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center justify-between gap-3 md:justify-end">
                 <span className="text-sm font-semibold">{money(product.branchPrices[0]?.salePrice ?? product.salePrice)}</span>
-                <button type="button" onClick={() => addProduct(product)} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97]">
+                <button
+                  type="button"
+                  onClick={() => addProduct(product)}
+                  className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97]"
+                >
                   Adicionar
                 </button>
               </div>
             </div>
           ))}
-          {products.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">Sem produtos. Cadastre pelo botão “Novo produto”.</p> : null}
+          {!productsIsLoading && products.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">Nenhum produto ativo encontrado para vender neste PDV.</p> : null}
+        </div>
+        <div className="flex flex-col gap-3 border-t border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">
+            {productsIsFetching ? "Atualizando produtos..." : `Página ${page}. Use a busca para localizar por nome, SKU ou EAN.`}
+          </p>
+          <div className="inline-flex items-center gap-1 rounded-lg border border-border bg-white p-1">
+            <button
+              type="button"
+              onClick={onPreviousPage}
+              disabled={!hasPreviousPage || productsIsFetching}
+              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition-[transform,background-color,color] hover:bg-slate-100 hover:text-slate-950 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              Anterior
+            </button>
+            <span className="min-w-10 rounded-md bg-slate-950 px-3 py-2 text-center text-sm font-semibold text-white">{page}</span>
+            <button
+              type="button"
+              onClick={onNextPage}
+              disabled={!hasNextPage || productsIsFetching}
+              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition-[transform,background-color,color] hover:bg-slate-100 hover:text-slate-950 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              Próxima
+            </button>
+          </div>
         </div>
       </article>
 
       <article className="rounded-lg border border-border bg-white">
         <div className="border-b border-border px-4 py-3">
           <h2 className="text-base font-semibold">Carrinho</h2>
-          <p className="text-sm text-muted-foreground">Finalize a venda com pagamento único (PIX).</p>
+          <p className="text-sm text-muted-foreground">Finalize a venda com baixa de estoque no depósito escolhido.</p>
         </div>
         <div className="space-y-3 p-4">
+          {warehousesIsLoading ? <p className="rounded-md border border-border bg-slate-50 px-3 py-2 text-sm text-muted-foreground">Carregando depósitos...</p> : null}
+          {warehousesError ? <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{warehousesError.message}</p> : null}
+          {!warehousesIsLoading && !warehousesError && warehouses.length === 0 ? (
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">Cadastre ou ative um depósito para esta loja antes de vender.</p>
+          ) : null}
           <label className="grid gap-1 text-sm font-medium text-slate-950">
             Depósito
             <select value={selectedWarehouseId} onChange={(event) => setSelectedWarehouseId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
@@ -2232,10 +2886,31 @@ function SalesPdvSection({
             </select>
           </label>
 
+          <label className="grid gap-1 text-sm font-medium text-slate-950">
+            Forma de pagamento
+            <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as SalePaymentMethod)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+              {salePaymentOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <div className="max-h-60 space-y-2 overflow-y-auto pr-1">
             {cart.map((item) => (
               <div key={item.productId} className="rounded-md border border-border p-2">
-                <p className="truncate text-sm font-medium text-slate-950">{item.name}</p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="truncate text-sm font-medium text-slate-950">{item.name}</p>
+                  <button
+                    type="button"
+                    onClick={() => setCart((current) => current.filter((entry) => entry.productId !== item.productId))}
+                    className="rounded-md p-1 text-muted-foreground transition-[transform,background-color,color] hover:bg-slate-100 hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    aria-label={`Remover ${item.name} do carrinho`}
+                  >
+                    <X aria-hidden="true" size={14} />
+                  </button>
+                </div>
                 <div className="mt-1 flex items-center justify-between">
                   <input
                     type="number"
@@ -2261,13 +2936,17 @@ function SalesPdvSection({
 
           <button
             type="button"
-            disabled={isCreating || cart.length === 0 || !selectedWarehouseId}
-            onClick={() =>
+            disabled={isCreating || cart.length === 0 || !selectedWarehouseIsValid}
+            onClick={() => {
+              if (!selectedWarehouseIsValid) {
+                return;
+              }
               onCreateSale({
                 warehouseId: selectedWarehouseId,
+                paymentMethod,
                 items: cart.map((item) => ({ productId: item.productId, quantity: String(item.quantity), unitPrice: item.unitPrice }))
-              })
-            }
+              });
+            }}
             className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
           >
             {isCreating ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <ShoppingCart aria-hidden="true" size={16} />}
@@ -2316,6 +2995,18 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     actionDescription: "A ação cria venda real no backend com baixa de estoque e idempotência.",
     status: "connected"
   },
+  "sales-history": {
+    title: "Histórico de vendas",
+    eyebrow: "Acompanhamento",
+    description: "Acompanhe vendas da loja ativa por cliente, origem, status, itens e pagamentos registrados.",
+    endpoint: "/api/v1/sales",
+    searchPlaceholder: "Buscar por cliente...",
+    emptyMessage: "Nenhuma venda encontrada no histórico.",
+    primaryAction: "Nova venda",
+    actionTitle: "Abrir PDV?",
+    actionDescription: "Você será levado para a tela de venda para registrar uma nova operação.",
+    status: "connected"
+  },
   payments: {
     title: "Pagamentos",
     eyebrow: "Financeiro",
@@ -2332,7 +3023,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     title: "Contas a receber",
     eyebrow: "Financeiro",
     description: "Acompanhe vendas com saldo pendente para priorizar cobrança e reduzir atraso de recebimento.",
-    endpoint: "/api/v1/sales",
+    endpoint: "/api/v1/finance/receivables",
     searchPlaceholder: "Buscar venda por cliente...",
     emptyMessage: "Nenhuma conta a receber encontrada.",
     primaryAction: "Priorizar cobranças",
@@ -2344,7 +3035,7 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     title: "Contas a pagar",
     eyebrow: "Financeiro",
     description: "Controle compromissos de compras para manter previsão de caixa e evitar atraso com fornecedores.",
-    endpoint: "/api/v1/purchases",
+    endpoint: "/api/v1/finance/payables",
     searchPlaceholder: "Buscar compra por fornecedor...",
     emptyMessage: "Nenhuma conta a pagar encontrada.",
     primaryAction: "Planejar pagamentos",
@@ -2423,26 +3114,64 @@ const operationalModules: Record<OperationalTab, OperationalModuleConfig> = {
     status: "connected"
   },
   integrations: {
-    title: "Integrações",
-    eyebrow: "Canais",
-    description: "Base para iFood, 99Food, marketplaces, PDV e e-commerce usando adapters e outbox.",
+    title: "iFood",
+    eyebrow: "Integrações",
+    description: "Conecte o iFood da loja atual para vender online e manter produtos, estoque e pedidos no Pulso.",
     endpoint: "/api/v1/integrations/connections",
-    searchPlaceholder: "Buscar conta externa...",
-    emptyMessage: "Nenhuma conexão configurada ainda.",
-    primaryAction: "Nova conexão",
-    actionTitle: "Criar conexão?",
-    actionDescription: "A ação cria conexão real no backend (sem iFood/99) para preparar integração operacional.",
-    status: "connected"
+    searchPlaceholder: "Buscar loja conectada...",
+    emptyMessage: "Esta loja ainda não tem iFood conectado.",
+    primaryAction: "Conectar iFood",
+    actionTitle: "Conectar iFood?",
+    actionDescription: "Vamos abrir o iFood para você autorizar esta loja. Depois é só colar o código exibido.",
+    status: "foundation"
   },
   channels: {
-    title: "Canais iFood/99 e marketplaces",
-    eyebrow: "Integrações futuras",
-    description: "Espaço reservado para iniciar conectores de iFood, 99Food e outros canais sem mudar a navegação depois.",
-    emptyMessage: "Canal ainda não iniciado.",
-    primaryAction: "Planejar conectores",
-    actionTitle: "Planejar conectores externos?",
-    actionDescription: "Fluxo planejado para próxima etapa, com credenciais seguras, catálogo, estoque e pedidos por canal.",
-    status: "planned"
+    title: "Catálogo iFood",
+    eyebrow: "Integrações",
+    description: "Envie produtos, preços, fotos e estoque da loja atual para o iFood.",
+    endpoint: "/api/v1/integrations/connections",
+    searchPlaceholder: "Buscar loja conectada...",
+    emptyMessage: "Conecte o iFood desta loja antes de sincronizar produtos.",
+    primaryAction: "Sincronizar catálogo",
+    actionTitle: "Sincronizar catálogo iFood?",
+    actionDescription: "Vamos enviar os produtos cadastrados, preços, fotos e estoque atual desta loja para o iFood.",
+    status: "connected"
+  },
+  "ifood-catalog": {
+    title: "Itens do iFood",
+    eyebrow: "Catálogo externo",
+    description: "Veja os itens que já existem no iFood e vincule ou crie produtos no ERP para processar pedidos.",
+    endpoint: "/api/v1/integrations/connections",
+    searchPlaceholder: "Buscar item, código ou categoria...",
+    emptyMessage: "Nenhum item iFood encontrado nesta loja.",
+    primaryAction: "Atualizar itens",
+    actionTitle: "Atualizar itens do iFood?",
+    actionDescription: "Vamos buscar novamente o catálogo atual do iFood e mostrar os itens sem vínculo.",
+    status: "connected"
+  },
+  "ifood-pending": {
+    title: "Pendências iFood",
+    eyebrow: "Operação",
+    description: "Itens aceitos no pedido iFood que ainda precisam de vínculo ou reserva de estoque no ERP.",
+    endpoint: "/api/v1/integrations/connections",
+    searchPlaceholder: "Buscar item pendente...",
+    emptyMessage: "Nenhuma pendência iFood aberta.",
+    primaryAction: "Atualizar pendências",
+    actionTitle: "Atualizar pendências iFood?",
+    actionDescription: "Vamos recarregar itens pendentes de vínculo e estoque.",
+    status: "connected"
+  },
+  "ifood-orders": {
+    title: "Pedidos iFood",
+    eyebrow: "Venda online",
+    description: "Acompanhe pedidos recebidos, notificações do iFood, reservas de estoque, pendências e conclusão operacional.",
+    endpoint: "/api/v1/sales",
+    searchPlaceholder: "Buscar por cliente do pedido...",
+    emptyMessage: "Nenhum pedido iFood recebido nesta loja.",
+    primaryAction: "Atualizar notificações",
+    actionTitle: "Atualizar notificações do iFood?",
+    actionDescription: "Vamos consultar novos eventos do iFood e atualizar pedidos, pendências e logs exibidos nesta tela.",
+    status: "connected"
   },
   reports: {
     title: "Relatórios",
@@ -2501,6 +3230,10 @@ function textValue(value: unknown, fallback = "Sem informação") {
   return fallback;
 }
 
+function isEntityIdValue(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9_-]{8,80}$/i.test(value);
+}
+
 function nestedName(item: GenericListItem, key: string, fallback = "Sem vínculo") {
   return textValue(asRecord(item[key])?.name, fallback);
 }
@@ -2524,6 +3257,568 @@ function isProductDetailsData(value: unknown): value is ProductItem {
   );
 }
 
+const detailLabels: Record<string, string> = {
+  active: "Status",
+  amount: "Valor",
+  barcode: "Código de barras",
+  barcodes: "Códigos de barras",
+  branch: "Loja",
+  branchAccesses: "Lojas permitidas",
+  branchPrices: "Preços por loja",
+  category: "Categoria",
+  channel: "Canal",
+  companyAccesses: "Acessos da empresa",
+  connectedAt: "Conectado em",
+  costPrice: "Custo",
+  countedQuantity: "Quantidade contada",
+  createdAt: "Criado em",
+  customer: "Cliente",
+  discount: "Desconto",
+  email: "E-mail",
+  externalAccountId: "Conta externa",
+  fileName: "Arquivo",
+  invalidRows: "Linhas com atenção",
+  items: "Itens",
+  lastError: "Último erro",
+  lastSyncedAt: "Última sincronização",
+  legalName: "Razão social",
+  method: "Forma de pagamento",
+  name: "Nome",
+  paidValue: "Valor pago",
+  payments: "Pagamentos",
+  phone: "Telefone",
+  product: "Produto",
+  quantity: "Quantidade",
+  quantityDelta: "Variação",
+  reasons: "Pendências",
+  resultType: "Tipo",
+  salePrice: "Preço de venda",
+  source: "Origem",
+  status: "Status",
+  subtotal: "Subtotal",
+  supplier: "Fornecedor",
+  title: "Título",
+  total: "Total",
+  tradeName: "Nome fantasia",
+  type: "Tipo",
+  unit: "Unidade",
+  unitCost: "Custo unitário",
+  unitPrice: "Preço unitário",
+  updatedAt: "Atualizado em",
+  validRows: "Linhas válidas",
+  warehouse: "Depósito"
+};
+
+const hiddenDetailKeys = new Set([
+  "accessToken",
+  "authorizationCodeVerifier",
+  "clientSecret",
+  "companyId",
+  "createdBy",
+  "imageDataUrl",
+  "imageMimeType",
+  "imageSizeBytes",
+  "imageUpdatedAt",
+  "password",
+  "passwordHash",
+  "refreshToken",
+  "tokenEncrypted",
+  "updatedBy"
+]);
+
+const moneyDetailKeys = new Set(["amount", "costPrice", "discount", "paidValue", "salePrice", "subtotal", "total", "unitCost", "unitPrice"]);
+const quantityDetailKeys = new Set(["countedQuantity", "invalidRows", "quantity", "quantityDelta", "validRows"]);
+const dateFormatter = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" });
+const enumLabels: Record<string, string> = {
+  API: "API",
+  BANK_TRANSFER: "Transferência bancária",
+  CANCELLED: "Cancelado",
+  CASH: "Dinheiro",
+  COMPLETED: "Concluído",
+  CONNECTED: "Conectado",
+  CREDIT_CARD: "Cartão de crédito",
+  DEBIT_CARD: "Cartão de débito",
+  DISCONNECTED: "Desconectado",
+  DRAFT: "Rascunho",
+  ECOMMERCE: "E-commerce",
+  ERROR: "Erro",
+  FINANCIAL_DUE: "Vencimento financeiro",
+  IFOOD: "iFood",
+  IFOOD_ORDER: "Pedido iFood",
+  IMPORT: "Importação",
+  MANUAL: "Manual",
+  MARKETPLACE: "Marketplace",
+  OPEN: "Aberto",
+  ORDERED: "Pedido realizado",
+  OTHER: "Outro",
+  PAID: "Quitado",
+  PAUSED: "Pausado",
+  PENDING: "Pendente",
+  PENDING_LINK: "Vincular produto",
+  PIX: "PIX",
+  POS: "PDV",
+  RECEIVED: "Recebido",
+  RESERVED: "Reservado",
+  PLACED: "Recebido",
+  CONFIRMED: "Confirmado",
+  DELIVERY_DROP_CODE_REQUESTED: "Código de entrega solicitado",
+  DELIVERY_CODE_REQUESTED: "Código de entrega solicitado",
+  PICKUP_CODE_REQUESTED: "Código de coleta solicitado",
+  ASSIGN_DRIVER: "Entregador definido",
+  DELIVERY_GROUP_ASSIGNED: "Entrega agrupada",
+  PREPARATION_STARTED: "Preparando",
+  READY_TO_PICKUP: "Pronto",
+  DISPATCHED: "Despachado",
+  DELIVERED: "Entregue",
+  SYNCED: "Sincronizado",
+  VOUCHER: "Vale/refeição"
+};
+
+const ifoodOrderStatusOptions: Array<{ value: IfoodOrderStatusFilter; label: string }> = [
+  { value: "ALL", label: "Todos" },
+  { value: "PENDING", label: "Pendente" },
+  { value: "RESERVED", label: "Reservado" },
+  { value: "PREPARATION_STARTED", label: "Preparando" },
+  { value: "READY_TO_PICKUP", label: "Pronto" },
+  { value: "DISPATCHED", label: "Despachado" },
+  { value: "COMPLETED", label: "Concluído" },
+  { value: "CANCELLED", label: "Cancelado" }
+];
+
+function normalizeIfoodOrderStatus(item: GenericListItem) {
+  const status = textValue(item.ifoodOrderStatus, textValue(item.status, "RESERVED"));
+  if (status.includes("CANCEL")) {
+    return "CANCELLED";
+  }
+  if (status === "DELIVERY_DROP_CODE_REQUESTED" || status === "DELIVERY_CODE_REQUESTED" || status === "PICKUP_CODE_REQUESTED" || status === "ASSIGN_DRIVER" || status === "DELIVERY_GROUP_ASSIGNED") {
+    return textValue(item.status, "RESERVED");
+  }
+  if (status === "CONFIRMED" || status === "PLACED") {
+    return textValue(item.status, "RESERVED");
+  }
+  if (status === "CONCLUDED" || status === "DELIVERED") {
+    return "COMPLETED";
+  }
+  return status;
+}
+
+function ifoodOrderNotificationId(item: GenericListItem) {
+  return textValue(item.ifoodOrderId, textValue(item.id, textValue(item.createdAt, "")));
+}
+
+function ifoodOrderStatusLabel(item: GenericListItem) {
+  const rawStatus = textValue(item.ifoodOrderStatus, "");
+  const normalized = normalizeIfoodOrderStatus(item);
+  return enumLabels[rawStatus] ?? enumLabels[normalized] ?? (rawStatus || normalized);
+}
+
+function ifoodOrderProductSummary(item: GenericListItem) {
+  const ifoodItems = Array.isArray(item.ifoodOrderItems) ? item.ifoodOrderItems.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
+  const ifoodNames = ifoodItems.map((orderItem) => textValue(orderItem.name, "")).filter(Boolean);
+  if (ifoodNames.length > 0) {
+    const visible = ifoodNames.slice(0, 2).join(", ");
+    return ifoodNames.length > 2 ? `${visible}...` : visible;
+  }
+
+  return "Itens do iFood ainda carregando";
+}
+
+function statusPillClass(status: string) {
+  switch (status) {
+    case "FAILED":
+    case "CANCELLED":
+      return "bg-red-50 text-red-700";
+    case "PROCESSING":
+    case "PENDING":
+    case "PENDING_LINK":
+      return "bg-amber-50 text-amber-700";
+    case "RECEIVED":
+    case "PLACED":
+    case "CONFIRMED":
+      return "bg-cyan-50 text-cyan-700";
+    case "PREPARATION_STARTED":
+      return "bg-indigo-50 text-indigo-700";
+    case "READY_TO_PICKUP":
+      return "bg-violet-50 text-violet-700";
+    case "DISPATCHED":
+      return "bg-blue-50 text-blue-700";
+    case "RESERVED":
+    case "COMPLETED":
+    case "DELIVERED":
+    case "SYNCED":
+      return "bg-emerald-50 text-emerald-700";
+    default:
+      return "bg-slate-100 text-slate-600";
+  }
+}
+
+function detailLabel(key: string) {
+  if (detailLabels[key]) {
+    return detailLabels[key];
+  }
+  return key
+    .replace(/Id$/, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function isHiddenDetailKey(key: string) {
+  return hiddenDetailKeys.has(key) || key.endsWith("Id") || key.toLowerCase().includes("secret") || key.toLowerCase().includes("token");
+}
+
+function formatDetailValue(key: string, value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "Não informado";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Sim" : "Não";
+  }
+  if (typeof value === "number") {
+    return quantityDetailKeys.has(key) ? numberFormatter.format(value) : String(value);
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const enumLabel = enumLabels[value];
+  if (enumLabel) {
+    return enumLabel;
+  }
+  if ((key.endsWith("At") || key.toLowerCase().includes("date")) && !Number.isNaN(Date.parse(value))) {
+    return dateFormatter.format(new Date(value));
+  }
+  if (moneyDetailKeys.has(key)) {
+    return money(value);
+  }
+  if (quantityDetailKeys.has(key)) {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numberFormatter.format(numericValue) : value;
+  }
+  return value;
+}
+
+function compactRecordValue(value: unknown) {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  return textValue(record.name ?? record.title ?? record.email ?? record.sku ?? record.method ?? record.status, "");
+}
+
+function detailFieldEntries(record: Record<string, unknown>) {
+  return Object.entries(record)
+    .filter(([key, value]) => !isHiddenDetailKey(key) && !Array.isArray(value))
+    .map(([key, value]) => {
+      const compact = compactRecordValue(value);
+      const formatted = compact || formatDetailValue(key, value);
+      return formatted ? { key, label: detailLabel(key), value: formatted } : null;
+    })
+    .filter((entry): entry is { key: string; label: string; value: string } => Boolean(entry));
+}
+
+function detailArraySections(record: Record<string, unknown>) {
+  return Object.entries(record).filter(([key, value]) => !isHiddenDetailKey(key) && Array.isArray(value)) as Array<[string, unknown[]]>;
+}
+
+function IfoodEventDetailsContent({ event }: { event: unknown }) {
+  const record = asRecord(event) ?? {};
+  const payload = asRecord(record.payload) ?? {};
+  const orderItems = Array.isArray(payload.orderItems)
+    ? payload.orderItems.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+    : [];
+  const processingError = textValue(payload.processingError, "Sem erro registrado.");
+
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-red-100 bg-red-50 p-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-red-700">Log do processamento</p>
+        <p className="mt-2 break-words text-sm font-medium leading-6 text-red-900">{processingError}</p>
+      </section>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[
+          ["Evento", textValue(record.eventType, "-")],
+          ["Status", textValue(record.status, "-")],
+          ["Tentativas", textValue(record.attempts, "0")],
+          ["ID do evento", textValue(record.externalEventId, "-")],
+          ["Pedido iFood", textValue(payload.orderId, "-")],
+          ["Criado em", dateValue(record.createdAt)]
+        ].map(([label, value]) => (
+          <article key={label} className="min-w-0 rounded-lg border border-border bg-slate-50 p-3">
+            <p className="text-xs text-muted-foreground">{label}</p>
+            <p className="mt-1 break-words text-sm font-medium text-slate-950">{value}</p>
+          </article>
+        ))}
+      </div>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">Itens recebidos do iFood</h3>
+        {orderItems.length > 0 ? (
+          <div className="grid gap-2">
+            {orderItems.map((item, index) => (
+              <article key={`${textValue(item.id, "item")}-${index}`} className="rounded-lg border border-border bg-white p-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="break-words text-sm font-semibold text-slate-950">{textValue(item.name, `Item ${index + 1}`)}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Use estes códigos para vincular ao produto do ERP.</p>
+                  </div>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+                    {numberFormatter.format(Number(textValue(item.quantity, "0")) || 0)}x
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  {[
+                    ["External code", textValue(item.externalCode, "-")],
+                    ["Item ID", textValue(item.id, "-")],
+                    ["EAN", textValue(item.ean, "-")],
+                    ["Preço", money(textValue(item.unitPrice ?? item.price, "0"))]
+                  ].map(([label, value]) => (
+                    <div key={label} className="min-w-0 rounded-md bg-slate-50 px-3 py-2">
+                      <p className="text-xs text-muted-foreground">{label}</p>
+                      <p className="mt-1 break-words font-mono text-sm text-slate-950">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-md border border-border bg-slate-50 px-3 py-2 text-sm text-muted-foreground">Nenhum item gravado no log deste evento.</p>
+        )}
+      </section>
+
+      <ReadableDetailsContent data={record} />
+    </div>
+  );
+}
+
+function IfoodOrderDetailsContent({ order }: { order: unknown }) {
+  const record = asRecord(order) ?? {};
+  const storedPayments = Array.isArray(record.payments) ? record.payments.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+  const ifoodPayments = Array.isArray(record.ifoodPaymentMethods) ? record.ifoodPaymentMethods.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+  const ifoodOrderItems = Array.isArray(record.ifoodOrderItems) ? record.ifoodOrderItems.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+  const payments = (storedPayments.length > 0 ? storedPayments : ifoodPayments).filter((payment) => Number(textValue(payment.amount, "0")) > 0);
+  const customer = asRecord(record.customer);
+  const warehouse = asRecord(record.warehouse);
+  const orderNumber = textValue(record.ifoodDisplayId, "Aguardando número do iFood");
+  const status = ifoodOrderStatusLabel(record as GenericListItem);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[
+          ["Pedido iFood", orderNumber],
+          ["Cliente", textValue(customer?.name, "Cliente não informado")],
+          ["Status", status],
+          ["Última notificação", enumLabels[textValue(record.ifoodLastNotification, "")] ?? textValue(record.ifoodLastNotification, "Sem notificação extra")],
+          ["Data", dateValue(record.createdAt)],
+          ["Depósito", textValue(warehouse?.name, "Não informado")],
+          ["Total", money(textValue(record.total, "0"))]
+        ].map(([label, value]) => (
+          <article key={label} className="min-w-0 rounded-lg border border-border bg-slate-50 p-3">
+            <p className="text-xs text-muted-foreground">{label}</p>
+            <p className="mt-1 break-words text-sm font-medium text-slate-950">{value}</p>
+          </article>
+        ))}
+      </div>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">Produtos</h3>
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div className="grid grid-cols-[1fr_80px_110px_110px] gap-3 border-b border-border bg-slate-50 px-3 py-2 text-xs font-medium text-muted-foreground">
+            <span>Produto</span>
+            <span>Qtd.</span>
+            <span>Unitário</span>
+            <span>Total</span>
+          </div>
+          {ifoodOrderItems.length > 0 ? (
+            ifoodOrderItems.map((item, index) => {
+              const quantity = Number(textValue(item.quantity, "0")) || 0;
+              const unitPrice = Number(textValue(item.unitPrice ?? item.price, "0")) || 0;
+              const total = quantity * unitPrice;
+              return (
+                <div key={textValue(item.id, `ifood-item-${index}`)} className="grid grid-cols-[1fr_80px_110px_110px] gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0">
+                  <div className="min-w-0">
+                    <p className="break-words font-medium text-slate-950">{textValue(item.name, "Produto iFood")}</p>
+                    <p className="mt-1 break-words text-xs text-muted-foreground">Código {textValue(item.externalCode, textValue(item.ean, textValue(item.id, "-")))}</p>
+                  </div>
+                  <p className="tabular-nums text-slate-700">{quantity || textValue(item.quantity, "-")}</p>
+                  <p className="tabular-nums text-slate-700">{money(unitPrice)}</p>
+                  <p className="tabular-nums font-medium text-slate-950">{money(total)}</p>
+                </div>
+              );
+            })
+          ) : (
+            <p className="px-3 py-3 text-sm text-muted-foreground">Itens oficiais do iFood ainda não disponíveis para este pedido.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-3">
+        <article className="rounded-lg border border-border bg-slate-50 p-3">
+          <p className="text-xs text-muted-foreground">Subtotal</p>
+          <p className="mt-1 text-sm font-medium text-slate-950">{money(textValue(record.subtotal, "0"))}</p>
+        </article>
+        <article className="rounded-lg border border-border bg-slate-50 p-3">
+          <p className="text-xs text-muted-foreground">Desconto</p>
+          <p className="mt-1 text-sm font-medium text-slate-950">{money(textValue(record.discount, "0"))}</p>
+        </article>
+        <article className="rounded-lg border border-border bg-slate-50 p-3">
+          <p className="text-xs text-muted-foreground">Pagamento</p>
+          <p className="mt-1 text-sm font-medium text-slate-950">
+            {payments.length > 0 ? payments.map((payment) => `${formatDetailValue("method", payment.method)} ${money(textValue(payment.amount, "0"))}`).join(", ") : "Não informado pelo iFood"}
+          </p>
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function ReadableDetailsContent({ data }: { data: unknown }) {
+  const record = asRecord(data);
+  if (!record) {
+    return <p className="text-sm text-muted-foreground">{formatDetailValue("value", data)}</p>;
+  }
+
+  const fields = detailFieldEntries(record);
+  const arrays = detailArraySections(record);
+
+  return (
+    <div className="space-y-5">
+      {fields.length > 0 ? (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {fields.map((field) => (
+            <article key={field.key} className="min-w-0 rounded-lg border border-border bg-slate-50 p-3">
+              <p className="text-xs text-muted-foreground">{field.label}</p>
+              <p className="mt-1 break-words text-sm font-medium text-slate-950">{field.value}</p>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-md border border-border bg-slate-50 px-3 py-2 text-sm text-muted-foreground">Nenhum detalhe adicional para exibir.</p>
+      )}
+
+      {arrays.map(([key, items]) => (
+        <ReadableDetailsArray key={key} title={detailLabel(key)} items={items} />
+      ))}
+    </div>
+  );
+}
+
+function ReadableDetailsArray({ title, items }: { title: string; items: unknown[] }) {
+  if (items.length === 0) {
+    return (
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+        <p className="rounded-md border border-border bg-slate-50 px-3 py-2 text-sm text-muted-foreground">Nenhum item registrado.</p>
+      </section>
+    );
+  }
+
+  const primitiveItems = items.filter((item) => !asRecord(item));
+  if (primitiveItems.length === items.length) {
+    return (
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+        <div className="flex flex-wrap gap-2">
+          {primitiveItems.map((item, index) => (
+            <span key={`${title}-${index}`} className="rounded-full border border-border bg-white px-3 py-1 text-sm text-slate-700">
+              {formatDetailValue(title, item)}
+            </span>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+      <div className="grid gap-2">
+        {items.map((item, index) => {
+          const record = asRecord(item);
+          if (!record) {
+            return null;
+          }
+          const fields = detailFieldEntries(record);
+          const titleValue = compactRecordValue(record.product) || compactRecordValue(record.customer) || compactRecordValue(record.supplier) || compactRecordValue(record.warehouse) || textValue(record.name ?? record.title ?? record.method ?? record.status, `${title} ${index + 1}`);
+          return (
+            <article key={`${title}-${index}`} className="rounded-lg border border-border bg-white p-3">
+              <p className="text-sm font-semibold text-slate-950">{titleValue}</p>
+              {fields.length > 0 ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {fields.map((field) => (
+                    <div key={field.key} className="min-w-0 rounded-md bg-slate-50 px-3 py-2">
+                      <p className="text-xs text-muted-foreground">{field.label}</p>
+                      <p className="mt-1 break-words text-sm font-medium text-slate-950">{field.value}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function BusyOverlay({ message }: { message: string }) {
+  return (
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/30 px-4 backdrop-blur-sm">
+      <div className="flex items-center gap-3 rounded-lg border border-white/70 bg-white/90 px-4 py-3 text-sm font-medium text-slate-800 shadow-lg shadow-slate-950/10">
+        <Loader2 aria-hidden="true" size={18} className="animate-spin text-emerald-700" />
+        <span>{message}</span>
+      </div>
+    </div>
+  );
+}
+
+function numericCodeFromText(value: unknown) {
+  const text = textValue(value, "");
+  if (!text) {
+    return "000000";
+  }
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) % 1000000;
+  }
+  return String(hash).padStart(6, "0");
+}
+
+function saleFriendlyNumber(item: GenericListItem) {
+  const ifoodNumber = textValue(item.ifoodDisplayId ?? item.displayId ?? item.orderDisplayId, "");
+  if (ifoodNumber) {
+    return ifoodNumber;
+  }
+  return numericCodeFromText(item.id);
+}
+
+function saleHasOfficialIfoodNumber(item: GenericListItem) {
+  return Boolean(textValue(item.ifoodDisplayId ?? item.displayId ?? item.orderDisplayId, ""));
+}
+
+function saleHistoryDisplayStatus(item: GenericListItem) {
+  const source = textValue(item.source, "MANUAL");
+  const terminalStatus = textValue(item.ifoodTerminalStatus, "");
+  if (source === "IFOOD" && (terminalStatus === "COMPLETED" || terminalStatus === "CANCELLED")) {
+    return terminalStatus;
+  }
+  const lastIfoodEventType = textValue(item.ifoodLastEventType, "");
+  if (source === "IFOOD" && (lastIfoodEventType === "CONCLUDED" || lastIfoodEventType === "DELIVERED" || lastIfoodEventType.endsWith("_CONCLUDED") || lastIfoodEventType.endsWith("_DELIVERED"))) {
+    return "COMPLETED";
+  }
+  if (source === "IFOOD" && (lastIfoodEventType === "CANCELLED" || lastIfoodEventType.endsWith("_CANCELLED"))) {
+    return "CANCELLED";
+  }
+  const status = textValue(item.status, "");
+  if (source === "IFOOD" && status === "PENDING") {
+    return "RECEIVED";
+  }
+  return status;
+}
+
 function itemSummary(tab: OperationalTab, item: GenericListItem) {
   const fiscalReasons = Array.isArray(item.reasons) ? item.reasons.length : 0;
   const itemCount = Array.isArray(item.items) ? item.items.length : 0;
@@ -2532,15 +3827,65 @@ function itemSummary(tab: OperationalTab, item: GenericListItem) {
   const paidValue = Array.isArray(item.payments)
     ? item.payments.reduce((sum, payment) => sum + (Number(asRecord(payment)?.amount ?? 0) || 0), 0)
     : 0;
-  const pendingValue = Math.max(totalValue - paidValue, 0);
+  const receivedValue = Math.min(Math.max(paidValue, 0), totalValue);
+  const pendingValue = Math.max(totalValue - receivedValue, 0);
 
   switch (tab) {
     case "sales":
+    case "sales-history": {
+      const source = textValue(item.source, "MANUAL");
+      const friendlyNumber = saleFriendlyNumber(item);
+      const displayStatus = tab === "sales-history" ? saleHistoryDisplayStatus(item) : textValue(item.status, "");
+      const titlePrefix = source === "IFOOD"
+        ? saleHasOfficialIfoodNumber(item)
+          ? `Pedido iFood #${friendlyNumber}`
+          : `Pedido iFood · Venda #${friendlyNumber}`
+        : `Venda #${friendlyNumber}`;
       return {
-        title: `${money(textValue(item.total, "0"))} em venda`,
+        title: `${titlePrefix} · ${money(textValue(item.total, "0"))}`,
         subtitle: nestedName(item, "customer", "Cliente não informado"),
-        meta: `${textValue(item.source, "MANUAL")} · ${dateValue(item.createdAt)}`,
-        status: textValue(item.status)
+        meta: `${enumLabels[source] ?? source} · ${dateValue(item.createdAt)}`,
+        status: displayStatus
+      };
+    }
+    case "ifood-orders": {
+      if (textValue(item.kind) === "IFOOD_EVENT") {
+        const payload = asRecord(item.payload) ?? {};
+        const orderItems = Array.isArray(payload.orderItems) ? payload.orderItems.map(asRecord).filter(Boolean) : [];
+        const firstOrderItem = orderItems[0];
+        const firstItemLabel = firstOrderItem
+          ? `${textValue(firstOrderItem.name, "Item iFood")} · codigo ${textValue(firstOrderItem.externalCode, textValue(firstOrderItem.ean, textValue(firstOrderItem.id, "-")))}`
+          : null;
+        return {
+          title: `Evento iFood ${textValue(item.eventType, "pedido")}`,
+          subtitle: firstItemLabel ? `${firstItemLabel} · ${textValue(payload.processingError, "Falha ao processar.")}` : textValue(payload.processingError, "Aguardando processamento do evento."),
+          meta: `${textValue(item.externalEventId, "sem id")} · ${dateValue(item.createdAt)}`,
+          status: textValue(item.status, "RECEIVED")
+        };
+      }
+      const displayId = textValue(item.ifoodDisplayId, "");
+      return {
+        title: displayId ? `Pedido iFood #${displayId}` : "Pedido iFood · aguardando número",
+        subtitle: ifoodOrderProductSummary(item),
+        meta: `${itemCount} item${itemCount === 1 ? "" : "s"} · ${money(textValue(item.total, "0"))} · ${dateValue(item.createdAt)}`,
+        status: ifoodOrderStatusLabel(item)
+      };
+    }
+    case "ifood-catalog":
+      return {
+        title: textValue(item.name, "Item iFood"),
+        subtitle: textValue(item.linked, "false") === "true" || item.linked === true
+          ? `Vinculado a ${nestedName(item, "mappedProduct", "produto ERP")}`
+          : `Sem vínculo no ERP · código ${textValue(item.externalCode, textValue(item.ean, textValue(item.ifoodItemId, "-")))}`,
+        meta: `${textValue(item.categoryName, "Sem categoria")} · ${money(textValue(item.price, "0"))}`,
+        status: item.linked ? "Vinculado" : "Pendente"
+      };
+    case "ifood-pending":
+      return {
+        title: textValue(item.name, "Item iFood pendente"),
+        subtitle: `Pedido ${textValue(item.ifoodOrderId, "-")} · código ${textValue(item.externalCode, textValue(item.ifoodItemId, "-"))}`,
+        meta: `${textValue(item.quantity, "0")}x · ${money(textValue(item.unitPrice, "0"))}`,
+        status: textValue(item.status, "PENDING_LINK")
       };
     case "payments":
       return {
@@ -2550,13 +3895,35 @@ function itemSummary(tab: OperationalTab, item: GenericListItem) {
         status: paymentCount > 0 ? "Registrado" : "Sem pagamento"
       };
     case "receivables":
+      if (textValue(item.sourceType, "") || textValue(item.direction, "")) {
+        const amount = Number(textValue(item.amount, "0")) || 0;
+        const paid = Number(textValue(item.paidAmount, "0")) || 0;
+        const financialStatus = textValue(item.status, "OPEN");
+        return {
+          title: `${money(Math.max(amount - paid, 0))} a receber`,
+          subtitle: textValue(item.partyName, "Cliente não informado"),
+          meta: `Vence em ${dateValue(item.dueDate)} · Parcela ${textValue(item.installmentNumber, "1")}/${textValue(item.installmentTotal, "1")}`,
+          status: financialStatus === "PAID" ? "Quitado" : financialStatus === "CANCELLED" ? "Cancelado" : "Em aberto"
+        };
+      }
       return {
         title: `${money(pendingValue)} pendente`,
         subtitle: nestedName(item, "customer", "Cliente não informado"),
-        meta: `Total ${money(totalValue)} · Recebido ${money(paidValue)}`,
+        meta: `Total ${money(totalValue)} · Recebido ${money(receivedValue)}`,
         status: pendingValue > 0 ? "Em aberto" : "Quitado"
       };
     case "payables":
+      if (textValue(item.sourceType, "") || textValue(item.direction, "")) {
+        const amount = Number(textValue(item.amount, "0")) || 0;
+        const paid = Number(textValue(item.paidAmount, "0")) || 0;
+        const financialStatus = textValue(item.status, "OPEN");
+        return {
+          title: `${money(Math.max(amount - paid, 0))} a pagar`,
+          subtitle: textValue(item.partyName, "Fornecedor não informado"),
+          meta: `Vence em ${dateValue(item.dueDate)} · Parcela ${textValue(item.installmentNumber, "1")}/${textValue(item.installmentTotal, "1")}`,
+          status: financialStatus === "PAID" ? "Quitado" : financialStatus === "CANCELLED" ? "Cancelado" : "Em aberto"
+        };
+      }
       return {
         title: `${money(textValue(item.total, "0"))} a pagar`,
         subtitle: nestedName(item, "supplier", "Fornecedor não informado"),
@@ -2612,13 +3979,16 @@ function itemSummary(tab: OperationalTab, item: GenericListItem) {
         meta: `${textValue(item.source, "CSV")} · ${dateValue(item.createdAt)}`,
         status: textValue(item.status, "Pendente")
       };
-    case "integrations":
+    case "integrations": {
+      const integrationStatus = textValue(item.status, "DISCONNECTED");
+      const connectedAt = item.connectedAt ? dateValue(item.connectedAt) : null;
       return {
-        title: textValue(item.channel, "Canal"),
-        subtitle: textValue(item.externalAccountId, "Conta externa ainda não informada"),
-        meta: item.lastSyncAt ? `Última sincronização ${dateValue(item.lastSyncAt)}` : `Criada em ${dateValue(item.createdAt)}`,
-        status: textValue(item.status, "Rascunho")
+        title: integrationStatus === "CONNECTED" ? "iFood conectado nesta loja" : "iFood aguardando autorização",
+        subtitle: integrationStatus === "CONNECTED" ? "Produtos e estoque podem ser enviados para venda online" : "Autorize no iFood e cole o código exibido",
+        meta: connectedAt ? `Conectada em ${connectedAt}` : `Criada em ${dateValue(item.createdAt)}`,
+        status: integrationStatus === "CONNECTED" ? "Conectado" : integrationStatus === "ERROR" ? "Erro" : integrationStatus === "PAUSED" ? "Pausado" : "Pendente"
       };
+    }
     case "reports":
       return {
         title: `Relatório de ${textValue(item.type, "operação").toLowerCase()}`,
@@ -2671,7 +4041,21 @@ function OperationalModuleSection({
   onPrevious,
   onNext,
   onPrimaryAction,
-  onViewDetails
+  onViewDetails,
+  onIfoodOrderAction,
+  onSaleCancel,
+  onPurchaseReceive,
+  onPurchaseCancel,
+  onFinancialSettle,
+  onFinancialCancel,
+  ifoodOrdersView = "orders",
+  onIfoodOrdersViewChange,
+  ifoodOrderStatusFilter = "ALL",
+  onIfoodOrderStatusFilterChange,
+  operationalStatusFilter = "ALL",
+  onOperationalStatusFilterChange,
+  ifoodPendingQuery,
+  isActionPending = false
 }: {
   tab: OperationalTab;
   config: OperationalModuleConfig;
@@ -2692,6 +4076,25 @@ function OperationalModuleSection({
   onNext: () => void;
   onPrimaryAction: (item?: GenericListItem) => void;
   onViewDetails: (item: GenericListItem) => void;
+  onIfoodOrderAction?: (saleId: string, action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH") => void;
+  onSaleCancel?: (item: GenericListItem) => void;
+  onPurchaseReceive?: (item: GenericListItem) => void;
+  onPurchaseCancel?: (item: GenericListItem) => void;
+  onFinancialSettle?: (item: GenericListItem) => void;
+  onFinancialCancel?: (item: GenericListItem) => void;
+  ifoodOrdersView?: IfoodOrdersView;
+  onIfoodOrdersViewChange?: (view: IfoodOrdersView) => void;
+  ifoodOrderStatusFilter?: IfoodOrderStatusFilter;
+  onIfoodOrderStatusFilterChange?: (status: IfoodOrderStatusFilter) => void;
+  operationalStatusFilter?: string;
+  onOperationalStatusFilterChange?: (status: string) => void;
+  ifoodPendingQuery?: {
+    data: GenericListResponse | undefined;
+    isLoading: boolean;
+    isFetching: boolean;
+    error: Error | null;
+  };
+  isActionPending?: boolean;
 }) {
   const connected = config.status === "connected";
   const statusClass = connected
@@ -2699,8 +4102,153 @@ function OperationalModuleSection({
     : config.status === "foundation"
       ? "border-amber-200 bg-amber-50 text-amber-700"
       : "border-slate-200 bg-slate-50 text-slate-600";
-  const items = query.data?.data ?? [];
-  const summary = query.data?.summary;
+  const baseItems = query.data?.data ?? [];
+  const pendingItems = ifoodPendingQuery?.data?.data ?? [];
+  const orderItems = baseItems.filter((item) => textValue(asRecord(item)?.kind, "") !== "IFOOD_EVENT");
+  const logItems = baseItems.filter((item) => textValue(asRecord(item)?.kind, "") === "IFOOD_EVENT");
+  const filteredOrderItems = orderItems.filter((item) => ifoodOrderStatusFilter === "ALL" || normalizeIfoodOrderStatus(item) === ifoodOrderStatusFilter);
+  const saleFinancialState = (item: GenericListItem) => {
+    const status = textValue(item.status, "");
+    if (status === "CANCELLED") {
+      return "CANCELLED";
+    }
+    if (textValue(item.direction, "")) {
+      return status === "PAID" ? "PAID" : "OPEN";
+    }
+    const totalValue = Number(textValue(item.total, "0")) || 0;
+    const paidValue = Array.isArray(item.payments) ? item.payments.reduce((sum, payment) => sum + (Number(asRecord(payment)?.amount ?? 0) || 0), 0) : 0;
+    return Math.max(totalValue - paidValue, 0) > 0 ? "OPEN" : "PAID";
+  };
+  const operationalFilterOptions =
+    tab === "sales-history"
+      ? [
+          { value: "ALL", label: "Todas" },
+          { value: "COMPLETED", label: "Concluídas" },
+          { value: "RESERVED", label: "Reservadas" },
+          { value: "CANCELLED", label: "Canceladas" },
+          { value: "IFOOD", label: "iFood" },
+          { value: "POS", label: "PDV" }
+        ]
+      : tab === "receivables"
+        ? [
+            { value: "ALL", label: "Todas" },
+            { value: "OPEN", label: "Em aberto" },
+            { value: "PAID", label: "Quitadas" },
+            { value: "CANCELLED", label: "Canceladas" }
+          ]
+      : tab === "payables"
+        ? [
+            { value: "ALL", label: "Todas" },
+            { value: "OPEN", label: "Em aberto" },
+            { value: "PAID", label: "Quitadas" },
+            { value: "OVERDUE", label: "Vencidas" },
+            { value: "CANCELLED", label: "Canceladas" }
+          ]
+      : tab === "purchases"
+        ? [
+            { value: "ALL", label: "Todas" },
+            { value: "DRAFT", label: "Rascunho" },
+            { value: "ORDERED", label: "Pedido" },
+            { value: "RECEIVED", label: "Recebida" },
+            { value: "CANCELLED", label: "Cancelada" }
+          ]
+      : [];
+  const filteredOperationalItems =
+    operationalStatusFilter === "ALL"
+      ? baseItems
+      : baseItems.filter((item) => {
+          if (tab === "receivables") {
+            return saleFinancialState(item) === operationalStatusFilter;
+          }
+          if (tab === "payables") {
+            if (operationalStatusFilter === "OVERDUE") {
+              const dueDate = typeof item.dueDate === "string" ? new Date(item.dueDate) : null;
+              return textValue(item.status, "") === "OPEN" && Boolean(dueDate && dueDate < new Date());
+            }
+            return textValue(item.status, "") === operationalStatusFilter;
+          }
+          if (tab === "sales-history" && (operationalStatusFilter === "IFOOD" || operationalStatusFilter === "POS")) {
+            return textValue(item.source, "") === operationalStatusFilter;
+          }
+          if (tab === "sales-history") {
+            return saleHistoryDisplayStatus(item) === operationalStatusFilter;
+          }
+          return textValue(item.status, "") === operationalStatusFilter;
+        });
+  const operationalFilterCounts = operationalFilterOptions.reduce<Record<string, number>>((acc, option) => {
+    acc[option.value] =
+      option.value === "ALL"
+        ? baseItems.length
+        : baseItems.filter((item) => {
+            if (tab === "receivables") {
+              return saleFinancialState(item) === option.value;
+            }
+            if (tab === "payables") {
+              if (option.value === "OVERDUE") {
+                const dueDate = typeof item.dueDate === "string" ? new Date(item.dueDate) : null;
+                return textValue(item.status, "") === "OPEN" && Boolean(dueDate && dueDate < new Date());
+              }
+              return textValue(item.status, "") === option.value;
+            }
+            if (tab === "sales-history" && (option.value === "IFOOD" || option.value === "POS")) {
+              return textValue(item.source, "") === option.value;
+            }
+            if (tab === "sales-history") {
+              return saleHistoryDisplayStatus(item) === option.value;
+            }
+            return textValue(item.status, "") === option.value;
+          }).length;
+    return acc;
+  }, {});
+  const filteredTotalValue = filteredOperationalItems.reduce((sum, item) => sum + (Number(textValue(item.total ?? item.amount, "0")) || 0), 0);
+  const filteredPendingValue = filteredOperationalItems.reduce((sum, item) => {
+    if (tab === "receivables") {
+      const totalValue = Number(textValue(item.total ?? item.amount, "0")) || 0;
+      const paidValue = Array.isArray(item.payments) ? item.payments.reduce((paymentSum, payment) => paymentSum + (Number(asRecord(payment)?.amount ?? 0) || 0), 0) : 0;
+      const entryPaidValue = Number(textValue(item.paidAmount, "0")) || 0;
+      return sum + Math.max(totalValue - Math.max(paidValue, entryPaidValue), 0);
+    }
+    if (tab === "payables") {
+      const amount = Number(textValue(item.amount, "0")) || 0;
+      const paid = Number(textValue(item.paidAmount, "0")) || 0;
+      return textValue(item.status, "") === "PAID" || textValue(item.status, "") === "CANCELLED" ? sum : sum + Math.max(amount - paid, 0);
+    }
+    if (tab === "purchases") {
+      return textValue(item.status, "") === "RECEIVED" || textValue(item.status, "") === "CANCELLED" ? sum : sum + (Number(textValue(item.total, "0")) || 0);
+    }
+    return sum;
+  }, 0);
+  const operationalMetricCards =
+    operationalFilterOptions.length > 0
+      ? [
+          { label: "Pedidos", value: numberFormatter.format(filteredOperationalItems.length) },
+          { label: tab === "receivables" ? "Total em vendas" : tab === "payables" || tab === "purchases" ? "Total em compras" : "Total vendido", value: money(filteredTotalValue) },
+          {
+            label: tab === "receivables" ? "A receber" : tab === "payables" || tab === "purchases" ? "Em aberto" : "Canceladas",
+            value: tab === "sales-history" ? numberFormatter.format(operationalFilterCounts.CANCELLED ?? 0) : money(filteredPendingValue)
+          }
+        ]
+      : [];
+  const items = tab === "ifood-orders" ? (ifoodOrdersView === "pending" ? pendingItems : ifoodOrdersView === "logs" ? logItems : filteredOrderItems) : filteredOperationalItems;
+  const activeQuery = tab === "ifood-orders" && ifoodOrdersView === "pending" && ifoodPendingQuery ? ifoodPendingQuery : query;
+  const summary = activeQuery.data?.summary;
+  const ifoodOrderStatusCounts = ifoodOrderStatusOptions.reduce<Record<IfoodOrderStatusFilter, number>>((acc, option) => {
+    acc[option.value] = option.value === "ALL" ? orderItems.length : orderItems.filter((item) => normalizeIfoodOrderStatus(item) === option.value).length;
+    return acc;
+  }, {} as Record<IfoodOrderStatusFilter, number>);
+  const isIfoodTab = tab === "integrations" || tab === "channels";
+  const hasConnectedIfood = isIfoodTab && items.some((item) => textValue(asRecord(item)?.status, "DISCONNECTED") === "CONNECTED");
+  const hasIfoodConnection = isIfoodTab && items.length > 0;
+  const moduleConnected = isIfoodTab ? hasConnectedIfood : connected;
+  const moduleStatusClass = moduleConnected
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : isIfoodTab && hasIfoodConnection
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : statusClass;
+  const moduleStatusLabel = moduleConnected ? "Conectado" : isIfoodTab && hasIfoodConnection ? "Pendente" : config.status === "foundation" ? "Base pronta" : "Planejado";
+  const primaryItem = isIfoodTab ? items[0] : undefined;
+  const primaryActionLabel =
+    tab === "integrations" && hasIfoodConnection ? (moduleConnected ? "Verificar iFood" : "Conectar iFood") : config.primaryAction;
 
   return (
     <section className="rounded-lg border border-border bg-white">
@@ -2709,8 +4257,8 @@ function OperationalModuleSection({
           <div className="max-w-2xl">
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">{config.eyebrow}</p>
-              <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusClass}`}>
-                {connected ? "Conectado" : config.status === "foundation" ? "Base pronta" : "Planejado"}
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${moduleStatusClass}`}>
+                {moduleStatusLabel}
               </span>
             </div>
             <h2 className="mt-2 text-xl font-semibold tracking-normal text-slate-950">{config.title}</h2>
@@ -2719,11 +4267,12 @@ function OperationalModuleSection({
 
           <button
             type="button"
-            onClick={() => onPrimaryAction()}
+            onClick={() => onPrimaryAction(primaryItem)}
+            disabled={isActionPending}
             className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] duration-150 ease-[var(--ease-out)] hover:bg-slate-800 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500"
           >
-            <ArrowRight aria-hidden="true" size={16} />
-            {config.primaryAction}
+            {isActionPending ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <ArrowRight aria-hidden="true" size={16} />}
+            {isActionPending ? "Atualizando..." : primaryActionLabel}
           </button>
         </div>
 
@@ -2771,26 +4320,219 @@ function OperationalModuleSection({
             ))}
           </div>
         ) : null}
+        {operationalMetricCards.length > 0 ? (
+          <div className="mt-4 grid gap-2 sm:grid-cols-3">
+            {operationalMetricCards.map((metric) => (
+              <article key={metric.label} className="rounded-lg border border-border bg-slate-50 p-3">
+                <p className="text-xs text-muted-foreground">{metric.label}</p>
+                <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{metric.value}</p>
+              </article>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {config.endpoint ? (
         <>
+          {tab === "ifood-orders" ? (
+            <div className="border-b border-border px-4 py-3">
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: "orders" as const, label: "Pedidos", count: orderItems.length },
+                  { value: "pending" as const, label: "Pendências", count: pendingItems.length },
+                  { value: "logs" as const, label: "Logs", count: logItems.length }
+                ].map((view) => {
+                  const active = ifoodOrdersView === view.value;
+                  return (
+                    <button
+                      key={view.value}
+                      type="button"
+                      onClick={() => onIfoodOrdersViewChange?.(view.value)}
+                      className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium transition-[transform,border-color,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                        active ? "border-slate-950 bg-slate-950 text-white" : "border-border bg-white text-slate-700 hover:border-emerald-200 hover:bg-emerald-50"
+                      }`}
+                    >
+                      {view.label}
+                      <span className={`rounded-full px-1.5 py-0.5 text-[11px] ${active ? "bg-white/15 text-white" : "bg-slate-100 text-slate-600"}`}>{view.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {ifoodOrdersView === "orders" ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {ifoodOrderStatusOptions.map((option) => {
+                    const active = ifoodOrderStatusFilter === option.value;
+                    const colorClass = option.value === "ALL" ? "bg-slate-100 text-slate-700" : statusPillClass(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => onIfoodOrderStatusFilterChange?.(option.value)}
+                        className={`inline-flex h-8 items-center gap-2 rounded-full border px-3 text-xs font-medium transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                          active ? "border-slate-950 bg-white text-slate-950 shadow-sm" : "border-transparent bg-white text-slate-600 hover:border-border hover:bg-slate-50"
+                        }`}
+                      >
+                        <span className={`h-2 w-2 rounded-full ${colorClass.split(" ")[0]}`} />
+                        {option.label}
+                        <span className="tabular-nums text-slate-500">{ifoodOrderStatusCounts[option.value] ?? 0}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {operationalFilterOptions.length > 0 ? (
+            <div className="border-b border-border px-4 py-3">
+              <div className="flex flex-wrap gap-2">
+                {operationalFilterOptions.map((option) => {
+                  const active = operationalStatusFilter === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => onOperationalStatusFilterChange?.(option.value)}
+                      className={`inline-flex h-8 items-center gap-2 rounded-full border px-3 text-xs font-medium transition-[transform,border-color,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                        active ? "border-slate-950 bg-slate-950 text-white" : "border-border bg-white text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-slate-950"
+                      }`}
+                    >
+                      {option.label}
+                      <span className={`tabular-nums ${active ? "text-white/80" : "text-slate-500"}`}>{operationalFilterCounts[option.value] ?? 0}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
           <div className="divide-y divide-border">
-            {query.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando {config.title.toLowerCase()}...</p> : null}
-            {query.error ? <p className="px-4 py-5 text-sm text-red-600">{query.error.message}</p> : null}
+            {activeQuery.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando {config.title.toLowerCase()}...</p> : null}
+            {activeQuery.error ? <p className="px-4 py-5 text-sm text-red-600">{activeQuery.error.message}</p> : null}
+            {tab === "ifood-orders" && (query.isFetching || ifoodPendingQuery?.isFetching) && !activeQuery.isLoading ? (
+              <div className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-muted-foreground">
+                <Loader2 aria-hidden="true" size={14} className="animate-spin text-emerald-700" />
+                Atualizando notificações e logs do iFood...
+              </div>
+            ) : null}
             {items.map((item) => {
-              const summaryItem = itemSummary(tab, item);
+              const displayedAsPending = tab === "ifood-orders" && ifoodOrdersView === "pending";
+              const summaryItem = itemSummary(displayedAsPending ? "ifood-pending" : tab, item);
+              const isIfoodEventItem = textValue(asRecord(item)?.kind, "") === "IFOOD_EVENT";
+              const itemStatus =
+                tab === "ifood-orders" && !isIfoodEventItem && !displayedAsPending
+                  ? normalizeIfoodOrderStatus(item)
+                  : tab === "sales-history"
+                    ? saleHistoryDisplayStatus(item)
+                    : textValue(asRecord(item)?.status, "DISCONNECTED");
+              const itemActionLabel =
+                tab === "integrations"
+                  ? itemStatus === "CONNECTED"
+                    ? "Verificar"
+                    : "Conectar"
+                  : tab === "ifood-catalog" && !asRecord(item)?.linked
+                    ? "Vincular"
+                    : tab === "ifood-pending" || displayedAsPending
+                      ? "Resolver"
+                      : tab === "ifood-orders"
+                        ? isIfoodEventItem
+                          ? "Atualizar log"
+                          : "Atualizar notificações"
+                        : "Abrir";
+              const showItemAction =
+                tab === "ifood-orders"
+                  ? displayedAsPending || isIfoodEventItem
+                  : tab !== "ifood-catalog" || !asRecord(item)?.linked;
+              const itemStatusClass =
+                tab === "integrations" && itemStatus === "CONNECTED"
+                  ? "bg-emerald-50 text-emerald-700"
+                  : tab === "integrations"
+                    ? "bg-amber-50 text-amber-700"
+                    : itemStatus === "COMPLETED" || itemStatus === "RECEIVED" || summaryItem.status === "Quitado"
+                      ? "bg-emerald-50 text-emerald-700"
+                    : itemStatus === "CANCELLED" || summaryItem.status === "Cancelado"
+                      ? "bg-red-50 text-red-700"
+                    : itemStatus === "ORDERED" || itemStatus === "DRAFT" || summaryItem.status === "Em aberto"
+                      ? "bg-amber-50 text-amber-700"
+                    : tab === "ifood-catalog" && asRecord(item)?.linked
+                      ? "bg-emerald-50 text-emerald-700"
+                      : tab === "ifood-catalog"
+                        ? "bg-amber-50 text-amber-700"
+                    : tab === "ifood-orders"
+                      ? statusPillClass(itemStatus)
+                    : "bg-slate-100 text-slate-600";
               return (
                 <article key={item.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[1fr_180px_280px] lg:items-center">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <h3 className="truncate text-sm font-medium">{summaryItem.title}</h3>
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{summaryItem.status}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${itemStatusClass}`}>{summaryItem.status}</span>
                     </div>
                     <p className="mt-1 truncate text-sm text-muted-foreground">{summaryItem.subtitle}</p>
                   </div>
                   <p className="truncate text-sm text-muted-foreground">{summaryItem.meta}</p>
                   <div className="flex items-center gap-2 lg:justify-end">
+                    {(tab === "receivables" || tab === "payables") && itemStatus === "OPEN" && onFinancialSettle ? (
+                      <button
+                        type="button"
+                        disabled={isActionPending}
+                        onClick={() => onFinancialSettle(item)}
+                        className="rounded-md border border-emerald-200 bg-white px-2.5 py-2 text-xs font-medium text-emerald-700 transition-[transform,background-color] hover:bg-emerald-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        Baixar
+                      </button>
+                    ) : null}
+                    {(tab === "receivables" || tab === "payables") && itemStatus === "OPEN" && onFinancialCancel ? (
+                      <button
+                        type="button"
+                        disabled={isActionPending}
+                        onClick={() => onFinancialCancel(item)}
+                        className="rounded-md border border-red-200 bg-white px-2.5 py-2 text-xs font-medium text-red-700 transition-[transform,background-color] hover:bg-red-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                      >
+                        Cancelar conta
+                      </button>
+                    ) : null}
+                    {tab === "sales-history" && itemStatus !== "CANCELLED" && onSaleCancel ? (
+                      <button
+                        type="button"
+                        disabled={isActionPending}
+                        onClick={() => onSaleCancel(item)}
+                        className="rounded-md border border-red-200 bg-white px-2.5 py-2 text-xs font-medium text-red-700 transition-[transform,background-color] hover:bg-red-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                      >
+                        Cancelar
+                      </button>
+                    ) : null}
+                    {tab === "purchases" && itemStatus !== "RECEIVED" && itemStatus !== "CANCELLED" && onPurchaseReceive ? (
+                      <button
+                        type="button"
+                        disabled={isActionPending}
+                        onClick={() => onPurchaseReceive(item)}
+                        className="rounded-md border border-emerald-200 bg-white px-2.5 py-2 text-xs font-medium text-emerald-700 transition-[transform,background-color] hover:bg-emerald-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        Receber
+                      </button>
+                    ) : null}
+                    {tab === "purchases" && itemStatus !== "RECEIVED" && itemStatus !== "CANCELLED" && onPurchaseCancel ? (
+                      <button
+                        type="button"
+                        disabled={isActionPending}
+                        onClick={() => onPurchaseCancel(item)}
+                        className="rounded-md border border-red-200 bg-white px-2.5 py-2 text-xs font-medium text-red-700 transition-[transform,background-color] hover:bg-red-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                      >
+                        Cancelar
+                      </button>
+                    ) : null}
+                    {tab === "ifood-orders" && ifoodOrdersView === "orders" && !isIfoodEventItem && onIfoodOrderAction ? (
+                      <>
+                        <button type="button" disabled={isActionPending} onClick={() => onIfoodOrderAction(textValue(item.id, ""), "START_PREPARATION")} className="rounded-md border border-border bg-white px-2.5 py-2 text-xs font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                          Preparar
+                        </button>
+                        <button type="button" disabled={isActionPending} onClick={() => onIfoodOrderAction(textValue(item.id, ""), "READY_TO_PICKUP")} className="rounded-md border border-border bg-white px-2.5 py-2 text-xs font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                          Pronto
+                        </button>
+                        <button type="button" disabled={isActionPending} onClick={() => onIfoodOrderAction(textValue(item.id, ""), "DISPATCH")} className="rounded-md border border-border bg-white px-2.5 py-2 text-xs font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                          Despachar
+                        </button>
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => onViewDetails(item)}
@@ -2800,26 +4542,29 @@ function OperationalModuleSection({
                     >
                       <Eye aria-hidden="true" size={16} />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => onPrimaryAction(item)}
-                      className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                    >
-                      Abrir fluxo
-                    </button>
+                    {showItemAction ? (
+                      <button
+                        type="button"
+                        onClick={() => onPrimaryAction(item)}
+                        disabled={isActionPending}
+                        className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        {itemActionLabel}
+                      </button>
+                    ) : null}
                   </div>
                 </article>
               );
             })}
-            {!query.isLoading && items.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">{config.emptyMessage}</p> : null}
+            {!activeQuery.isLoading && items.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">{config.emptyMessage}</p> : null}
           </div>
           <PaginationBar
             page={page}
             limit={limit}
             onLimitChange={onLimitChange}
             canPrevious={page > 1}
-            canNext={Boolean(query.data?.nextCursor)}
-            isFetching={query.isFetching}
+            canNext={Boolean(activeQuery.data?.nextCursor)}
+            isFetching={activeQuery.isFetching}
             onPrevious={onPrevious}
             onNext={onNext}
           />
@@ -2915,6 +4660,8 @@ function SettingsSection({
   onSavePricing,
   isSavingPricing,
   canManageFiscalPricing,
+  ifoodConnection,
+  onConfigureIfoodStock,
   onOpenAction
 }: {
   companyName: string;
@@ -2935,8 +4682,19 @@ function SettingsSection({
   onSavePricing: () => void;
   isSavingPricing: boolean;
   canManageFiscalPricing: boolean;
+  ifoodConnection: GenericListItem | null;
+  onConfigureIfoodStock: (connection: GenericListItem) => void;
   onOpenAction: (title: string, description: string) => void;
 }) {
+  const ifoodConnected = textValue(ifoodConnection?.status, "DISCONNECTED") === "CONNECTED";
+  const stockMode = textValue(ifoodConnection?.ecommerceStockMode, "FULL");
+  const stockRuleLabel =
+    stockMode === "PERCENT"
+      ? `${textValue(ifoodConnection?.ecommerceStockPercent, "0")}% do estoque`
+      : stockMode === "FIXED"
+        ? `Até ${textValue(ifoodConnection?.ecommerceStockFixedQuantity, "0")} unidades`
+        : "Todo o estoque disponível";
+
   return (
     <div className="grid gap-4">
       <section className="electric-border electric-border-soft overflow-hidden rounded-lg border border-emerald-100 bg-white">
@@ -2944,9 +4702,7 @@ function SettingsSection({
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Configuração ativa</p>
             <h2 className="mt-2 text-xl font-semibold tracking-normal text-slate-950">Empresa, loja e preferências do Pulso</h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Ajuste o comportamento da tela sem misturar dados de outra empresa ou loja. Configurações sensíveis continuam dependendo do backend para valer na operação real.
-            </p>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">Ajuste as regras da empresa e da loja que você está usando agora.</p>
           </div>
           <div className="rounded-lg border border-border bg-slate-50 p-3">
             <p className="text-xs text-muted-foreground">Empresa atual</p>
@@ -3086,7 +4842,7 @@ function SettingsSection({
           <SettingsToggleRow title="Ocultar dados sensíveis em listas" description="Reduz exposição de documentos, e-mails e valores quando a tela estiver compartilhada." checked={settings.hideSensitiveData} onChange={(checked) => onToggle("hideSensitiveData", checked)} />
         </SettingsCard>
 
-        <SettingsCard icon={Boxes} title="Estoque e operação" description="Regras operacionais que protegem saldo, loja ativa e alertas do dia.">
+      <SettingsCard icon={Boxes} title="Estoque e operação" description="Regras operacionais que protegem saldo, loja ativa e alertas do dia.">
           <SettingsToggleRow
             title="Bloquear estoque negativo"
             description="No backend de produção, vendas simultâneas não poderão baixar além do saldo permitido."
@@ -3096,11 +4852,45 @@ function SettingsSection({
           />
           <SettingsToggleRow title="Alertar produto acabando" description="Mostra alertas claros quando saldo chegar perto do ponto de reposição." checked={settings.lowStockAlerts} onChange={(checked) => onToggle("lowStockAlerts", checked)} />
           <SettingsToggleRow title="Usar loja atual como filtro padrão" description="Listas de estoque, vendas e compras começam pela loja selecionada." checked={settings.currentBranchOnly} onChange={(checked) => onToggle("currentBranchOnly", checked)} />
-        </SettingsCard>
+      </SettingsCard>
 
-        <SettingsCard icon={Plug} title="Fiscal e canais" description="Preparação para crescer sem espalhar regra fiscal ou integração pelo sistema.">
-          <SettingsToggleRow title="Mostrar pendências fiscais" description="Produtos sem NCM, ICMS, PIS ou COFINS continuam visíveis sem travar o cadastro simples." checked={settings.showFiscalPending} onChange={(checked) => onToggle("showFiscalPending", checked)} />
-          <SettingsToggleRow title="Preparar sincronização por canal" description="Mantém a estrutura de iFood, 99Food e outros canais visível quando houver conexão." checked={settings.prepareChannelSync} onChange={(checked) => onToggle("prepareChannelSync", checked)} />
+      <SettingsCard icon={Plug} title="Venda online da loja atual" description="Defina como o estoque desta loja aparece para quem compra no iFood.">
+        <div className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-slate-950">Estoque enviado ao iFood</h3>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              {ifoodConnection
+                ? `Hoje: ${stockRuleLabel}. Essa regra vale só para ${branchName}.`
+                : "Conecte o iFood desta loja para escolher quanto estoque fica disponível online."}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={!ifoodConnection}
+            onClick={() => {
+              if (ifoodConnection) {
+                onConfigureIfoodStock(ifoodConnection);
+              }
+            }}
+            className="inline-flex items-center justify-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          >
+            <Plug aria-hidden="true" size={16} />
+            {ifoodConnection ? "Alterar regra" : "iFood não conectado"}
+          </button>
+        </div>
+        <div className="border-t border-border px-4 py-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${ifoodConnected ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {ifoodConnected ? "iFood conectado" : ifoodConnection ? "Conexão pendente" : "Sem iFood nesta loja"}
+            </span>
+            {ifoodConnection?.lastSyncAt ? <span className="text-xs text-muted-foreground">Última sincronização: {dateValue(ifoodConnection.lastSyncAt)}</span> : null}
+          </div>
+        </div>
+      </SettingsCard>
+
+      <SettingsCard icon={Plug} title="Fiscal e preferências" description="Opções que ajudam no dia a dia sem alterar produtos já vendidos.">
+        <SettingsToggleRow title="Mostrar pendências fiscais" description="Produtos sem NCM, ICMS, PIS ou COFINS continuam visíveis sem travar o cadastro simples." checked={settings.showFiscalPending} onChange={(checked) => onToggle("showFiscalPending", checked)} />
+        <SettingsToggleRow title="Mostrar atalhos de venda online" description="Mantém as áreas do iFood disponíveis no menu para conectar loja e sincronizar produtos." checked={settings.prepareChannelSync} onChange={(checked) => onToggle("prepareChannelSync", checked)} />
           <div className="border-t border-border px-4 py-4">
             <button
               type="button"
@@ -3320,15 +5110,14 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
   {
     title: "Hoje",
     items: [
-      { label: "Painel", icon: BarChart3, tab: "overview", status: "available" },
-      { label: "Alertas", icon: Bell, tab: "alerts", status: "available" },
-      { label: "Busca rápida", icon: Search, tab: "global-search", status: "available" }
+      { label: "Painel", icon: BarChart3, tab: "overview", status: "available" }
     ]
   },
   {
     title: "Operação",
     items: [
       { label: "Vendas", icon: ShoppingCart, tab: "sales", status: "available" },
+      { label: "Histórico de vendas", icon: ReceiptText, tab: "sales-history", status: "available" },
       { label: "Pagamentos", icon: CreditCard, tab: "payments", status: "available" },
       { label: "Contas a receber", icon: ReceiptText, tab: "receivables", status: "available" },
       { label: "Contas a pagar", icon: FileText, tab: "payables", status: "available" },
@@ -3354,13 +5143,19 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
     ]
   },
   {
-    title: "Crescimento",
+    title: "Fiscal e dados",
     items: [
       { label: "Fiscal", icon: Landmark, tab: "fiscal", status: "available" },
       { label: "Migração", icon: Upload, tab: "imports", status: "available" },
-      { label: "Integrações", icon: Plug, tab: "integrations", status: "available" },
-      { label: "Canais iFood/99", icon: Plug, tab: "channels", badge: "Em breve", status: "soon" },
       { label: "Relatórios", icon: ReceiptText, tab: "reports", status: "available" }
+    ]
+  },
+  {
+    title: "Integrações",
+    items: [
+      { label: "Config iFood", icon: Plug, tab: "integrations", status: "available" },
+      { label: "Itens do iFood", icon: ClipboardCheck, tab: "ifood-catalog", status: "available", requiresIfood: true },
+      { label: "Pedidos iFood", icon: ShoppingBag, tab: "ifood-orders", status: "available", requiresIfood: true }
     ]
   },
   {
@@ -3372,23 +5167,9 @@ const sidebarGroups: Array<{ title: string; items: SidebarItem[] }> = [
   }
 ];
 
-function AppSidebar({
-  activeTab,
-  onNavigate,
-  onUnavailableItem,
-  companyName,
-  branchName,
-  userName,
-  branches,
-  activeBranchId,
-  isSwitchingBranch,
-  onBranchChange,
-  collapsed,
-  onToggleCollapsed,
-  onLogout
-}: {
+const AppSidebar = forwardRef<HTMLElement, {
   activeTab: DashboardTab;
-  onNavigate: () => void;
+  onNavigateTo: (href: string) => void;
   onUnavailableItem: (item: SidebarItem) => void;
   companyName: string;
   branchName: string;
@@ -3397,35 +5178,67 @@ function AppSidebar({
   activeBranchId: string | undefined;
   isSwitchingBranch: boolean;
   onBranchChange: (branchId: string) => void;
+  ifoodConnected: boolean;
+  ifoodOrderNotificationCount: number;
+  ifoodOrderNotificationText: string | null;
+  onIfoodOrderNotificationsRead: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onLogout: () => void | Promise<void>;
-}) {
+}>(function AppSidebar({
+  activeTab,
+  onNavigateTo,
+  onUnavailableItem,
+  companyName,
+  branchName,
+  userName,
+  branches,
+  activeBranchId,
+  isSwitchingBranch,
+  onBranchChange,
+  ifoodConnected,
+  ifoodOrderNotificationCount,
+  ifoodOrderNotificationText,
+  onIfoodOrderNotificationsRead,
+  collapsed,
+  onToggleCollapsed,
+  onLogout
+}, ref) {
   const [contextOpen, setContextOpen] = useState(false);
+  const notificationHref = ifoodOrderNotificationCount > 0 ? tabRoutes["ifood-orders"] : tabRoutes.alerts;
+  const notificationActive = activeTab === "alerts" || (ifoodOrderNotificationCount > 0 && activeTab === "ifood-orders");
+  const openNotifications = () => {
+    if (ifoodOrderNotificationCount > 0) {
+      onIfoodOrderNotificationsRead();
+    }
+    onNavigateTo(notificationHref);
+  };
 
   return (
     <aside
-      className={`relative z-40 hidden h-screen shrink-0 border-r border-emerald-100 bg-white shadow-[18px_0_60px_rgba(15,23,42,0.06)] transition-[width] duration-300 ease-[var(--ease-out)] lg:sticky lg:top-0 lg:flex lg:flex-col ${
+      ref={ref}
+      className={`app-sidebar-shell relative z-40 m-3 hidden h-[calc(100vh-1.5rem)] shrink-0 overflow-visible rounded-[22px] border border-emerald-100 shadow-[18px_18px_60px_rgba(15,23,42,0.12)] transition-[width] duration-300 ease-[var(--ease-out)] lg:sticky lg:top-3 lg:flex lg:flex-col ${
         collapsed ? "w-20" : "w-72"
       }`}
     >
+      <button
+        type="button"
+        onClick={onToggleCollapsed}
+        aria-label={collapsed ? "Expandir menu lateral" : "Encolher menu lateral"}
+        className="absolute -right-4 top-5 z-50 hidden h-8 w-8 items-center justify-center rounded-full border border-emerald-200 bg-white text-emerald-700 shadow-md shadow-slate-950/12 transition-[transform,background-color,color,border-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-300 hover:bg-emerald-50 active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 lg:inline-flex"
+      >
+        {collapsed ? <ChevronRight aria-hidden="true" size={16} /> : <ChevronLeft aria-hidden="true" size={16} />}
+      </button>
+
       <div className={`border-b border-border p-4 ${collapsed ? "px-3" : ""}`}>
-        <div className={`flex items-center ${collapsed ? "justify-center" : "justify-between gap-3"}`}>
+        <div className={`flex items-center ${collapsed ? "justify-center gap-2" : "justify-between gap-2"}`}>
           {collapsed ? <BrandMark compact /> : <BrandMark />}
-          <button
-            type="button"
-            onClick={onToggleCollapsed}
-            aria-label={collapsed ? "Expandir menu lateral" : "Encolher menu lateral"}
-            className="hidden rounded-md border border-border bg-white p-2 text-slate-700 transition-[transform,border-color,background-color,color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 lg:inline-flex"
-          >
-            {collapsed ? <ChevronRight aria-hidden="true" size={16} /> : <ChevronLeft aria-hidden="true" size={16} />}
-          </button>
         </div>
         <button
           type="button"
           aria-label={`Contexto atual: ${companyName}, ${branchName}`}
           onClick={() => setContextOpen((value) => !value)}
-          className={`electric-border electric-border-soft mt-4 flex w-full items-center rounded-lg border border-emerald-100 bg-slate-50 text-left transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50/50 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+          className={`mt-4 flex w-full items-center rounded-lg border border-emerald-100 bg-slate-50 text-left text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50/60 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
             collapsed ? "justify-center px-2 py-2.5" : "gap-3 px-3 py-2"
           }`}
         >
@@ -3458,7 +5271,7 @@ function AppSidebar({
                     onBranchChange(branch.id);
                   }}
                   className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                    branch.id === activeBranchId ? "bg-emerald-50 font-medium text-emerald-700" : "text-slate-700 hover:bg-slate-50"
+                    branch.id === activeBranchId ? "bg-emerald-50 font-medium text-emerald-700" : "text-slate-700 hover:bg-slate-50 hover:text-slate-950"
                   } disabled:cursor-not-allowed disabled:opacity-70`}
                 >
                   <span className="truncate">{branch.name}</span>
@@ -3471,39 +5284,33 @@ function AppSidebar({
         ) : null}
       </div>
 
-      <nav aria-label="Módulos do ERP" className={`app-sidebar-scroll min-h-0 flex-1 overflow-y-auto py-4 ${collapsed ? "px-2" : "px-3"}`}>
-        {!collapsed ? (
-          <div className="mb-4 rounded-lg border border-border bg-slate-50 px-3 py-2 text-xs leading-5 text-muted-foreground">
-            <p><span className="font-semibold text-slate-950">Disponível:</span> abre tela agora.</p>
-            <p><span className="font-semibold text-amber-700">Base pronta:</span> backend ativo, tela dedicada em evolução.</p>
-            <p><span className="font-semibold text-slate-500">Em breve:</span> planejado.</p>
-          </div>
-        ) : null}
-        <div className={collapsed ? "grid gap-3" : "grid gap-5"}>
+      <nav aria-label="Módulos do ERP" className="app-sidebar-nav app-sidebar-scroll min-h-0 flex-1 overflow-y-auto py-4">
+        <div className={`app-sidebar-menu-groups relative grid min-h-full ${collapsed ? "gap-3" : "gap-5"}`}>
           {sidebarGroups.map((group) => (
             <section key={group.title}>
-              {!collapsed ? <h2 className="px-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{group.title}</h2> : null}
-              <div className="mt-2 grid gap-1">
+              {!collapsed ? <h2 className="px-5 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{group.title}</h2> : null}
+              <div className="mt-2 grid gap-1.5">
                 {group.items.map((item) => {
                   const Icon = item.icon;
                   const active = item.tab === activeTab;
                   const href = item.href ?? (item.tab ? tabRoutes[item.tab] : undefined);
-                  const available = item.status === "available";
+                  const blockedByIfood = Boolean(item.requiresIfood && !ifoodConnected);
+                  const available = item.status === "available" && !blockedByIfood;
                   const foundation = item.status === "foundation";
-                  const statusLabel = available ? "Disponível" : foundation ? "Base pronta, tela em breve" : "Em breve";
+                  const statusLabel = blockedByIfood ? "Configure o iFood primeiro" : available ? "Disponível" : foundation ? "Base pronta, tela em breve" : "Em breve";
                   const badgeClass = foundation
                     ? "bg-amber-50 text-amber-700"
                     : item.status === "soon"
                       ? "bg-slate-100 text-slate-500"
                       : "bg-emerald-50 text-emerald-700";
-                  const itemClassName = `relative flex w-full items-center rounded-md text-left text-sm transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                        collapsed ? "justify-center px-2 py-2.5" : "gap-3 px-2.5 py-2"
+                  const itemClassName = `app-sidebar-menu-item relative z-10 flex items-center text-left text-sm transition-[transform,background-color,color,box-shadow] duration-300 ease-[var(--ease-out)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 ${
+                        collapsed ? (active ? "app-sidebar-menu-active ml-3 w-[calc(100%-0.75rem)] justify-center rounded-l-[18px] pr-3" : "mx-3 w-[calc(100%-1.5rem)] justify-center rounded-[16px] px-2") : active ? "app-sidebar-menu-active w-full gap-3 rounded-l-[18px] pl-5 pr-5" : "mx-3 w-[calc(100%-1.5rem)] gap-3 rounded-[16px] px-4"
                       } ${
                         active
-                          ? "bg-emerald-600 font-medium text-white"
+                          ? "font-semibold shadow-[0_12px_28px_rgba(15,23,42,0.12)]"
                           : available
-                            ? "text-slate-700 hover:bg-slate-100 hover:text-slate-950"
-                            : foundation
+                            ? "text-slate-700 hover:bg-emerald-50 hover:text-emerald-700"
+                            : foundation || blockedByIfood
                               ? "cursor-help text-amber-800 hover:bg-amber-50"
                               : "cursor-help text-slate-400 hover:bg-slate-50"
                       }`;
@@ -3524,16 +5331,16 @@ function AppSidebar({
 
                   if (href && available) {
                     return (
-                      <Link
+                      <button
                         key={item.label}
-                        href={href}
+                        type="button"
                         title={collapsed ? `${item.label} - ${statusLabel}` : statusLabel}
                         aria-label={collapsed ? `${item.label} - ${statusLabel}` : undefined}
-                        onClick={onNavigate}
+                        onClick={() => onNavigateTo(href)}
                         className={itemClassName}
                       >
                         {itemContent}
-                      </Link>
+                      </button>
                     );
                   }
 
@@ -3557,52 +5364,119 @@ function AppSidebar({
       </nav>
 
       <div className="border-t border-border p-3">
-        <div className={`rounded-lg bg-slate-50 p-3 ${collapsed ? "grid justify-items-center gap-2" : "flex items-center gap-3"}`}>
+        <div className={`rounded-[16px] bg-slate-50 p-3 ${collapsed ? "grid justify-items-center gap-2" : "flex items-center gap-3"}`}>
           <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-950 text-sm font-semibold text-white">
             {userName.slice(0, 1).toUpperCase()}
           </div>
           {collapsed ? (
-            <button
-              type="button"
-              onClick={onLogout}
-              aria-label="Sair"
-              title="Sair"
-              className="rounded-md p-2 text-muted-foreground transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-white hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-            >
-              <LogOut aria-hidden="true" size={16} />
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={openNotifications}
+                aria-label={ifoodOrderNotificationCount > 0 ? "Abrir pedidos iFood recebidos" : "Abrir alertas"}
+                title={ifoodOrderNotificationCount > 0 ? "Pedido iFood recebido" : "Alertas"}
+                className={`relative rounded-md p-2 transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                  notificationActive ? "bg-emerald-600 text-white" : "text-muted-foreground hover:bg-white hover:text-slate-950"
+                }`}
+              >
+                <Bell aria-hidden="true" size={16} />
+                {ifoodOrderNotificationCount > 0 ? (
+                  <span className="absolute -right-1 -top-1 grid min-h-4 min-w-4 place-items-center rounded-full bg-emerald-600 px-1 text-[10px] font-semibold leading-none text-white ring-2 ring-slate-50">
+                    {ifoodOrderNotificationCount > 9 ? "9+" : ifoodOrderNotificationCount}
+                  </span>
+                ) : null}
+                {ifoodOrderNotificationText ? (
+                  <span className="pointer-events-none absolute left-[calc(100%+8px)] top-1/2 z-50 w-max -translate-y-1/2 rounded-md border border-emerald-100 bg-white px-2.5 py-1.5 text-[11px] font-medium leading-none text-emerald-700 opacity-100 shadow-lg shadow-slate-950/10">
+                    {ifoodOrderNotificationText}
+                  </span>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={onLogout}
+                aria-label="Sair"
+                title="Sair"
+                className="rounded-md p-2 text-muted-foreground transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-white hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                <LogOut aria-hidden="true" size={16} />
+              </button>
+            </>
           ) : (
             <>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-slate-950">{userName}</p>
                 <p className="truncate text-xs text-muted-foreground">Conta da empresa</p>
               </div>
-              <button
-                type="button"
-                onClick={onLogout}
-                aria-label="Sair"
-                className="rounded-md p-2 text-muted-foreground transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-white hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-              >
-                <LogOut aria-hidden="true" size={16} />
-              </button>
+              <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={openNotifications}
+                    aria-label={ifoodOrderNotificationCount > 0 ? "Abrir pedidos iFood recebidos" : "Abrir alertas"}
+                    title={ifoodOrderNotificationCount > 0 ? "Pedido iFood recebido" : "Alertas"}
+                    className={`relative rounded-md p-2 transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                      notificationActive ? "bg-emerald-600 text-white" : "text-muted-foreground hover:bg-white hover:text-slate-950"
+                    }`}
+                  >
+                    <Bell aria-hidden="true" size={16} />
+                    {ifoodOrderNotificationCount > 0 ? (
+                      <span className="absolute -right-1 -top-1 grid min-h-4 min-w-4 place-items-center rounded-full bg-emerald-600 px-1 text-[10px] font-semibold leading-none text-white ring-2 ring-slate-50">
+                        {ifoodOrderNotificationCount > 9 ? "9+" : ifoodOrderNotificationCount}
+                      </span>
+                    ) : null}
+                  </button>
+                  {ifoodOrderNotificationText ? (
+                    <button
+                      type="button"
+                      onClick={openNotifications}
+                      className="max-w-[136px] text-left text-[11px] font-medium leading-tight text-emerald-700 transition-colors hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      {ifoodOrderNotificationText}
+                    </button>
+                  ) : null}
+                </div>
+                {ifoodOrderNotificationCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={onIfoodOrderNotificationsRead}
+                    className="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-white hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  >
+                    Lido
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  aria-label="Sair"
+                  title="Sair"
+                  className="rounded-md p-2 text-muted-foreground transition-[transform,background-color,color] duration-150 ease-[var(--ease-out)] hover:bg-white hover:text-slate-950 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                >
+                  <LogOut aria-hidden="true" size={16} />
+                </button>
+              </div>
             </>
           )}
         </div>
       </div>
     </aside>
   );
-}
+});
 
 function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: string; onSessionChange: (session: LoginResponse) => void; onLogout: () => void | Promise<void> }) {
   const pathname = usePathname();
-  const router = useRouter();
   const queryClient = useQueryClient();
+  const sidebarRef = useRef<HTMLElement>(null);
   const contentFocusRef = useRef<HTMLElement>(null);
-  const tab = tabFromPathname(pathname);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState<DashboardTab>(() => tabFromPathname(pathname));
+  const [contentTransitioning, setContentTransitioning] = useState(false);
+  const tab = activeTab;
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [alert, setAlert] = useState<AppAlert | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [detailsDialog, setDetailsDialog] = useState<DetailsDialogState | null>(null);
+  const [ifoodOauthDialog, setIfoodOauthDialog] = useState<IfoodOauthDialogState | null>(null);
+  const [ifoodStockSettingsDialog, setIfoodStockSettingsDialog] = useState<IfoodStockSettingsDialogState | null>(null);
+  const [ifoodCatalogLinkDialog, setIfoodCatalogLinkDialog] = useState<IfoodCatalogLinkDialogState | null>(null);
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
   const [settingsState, setSettingsState] = useState<SettingsState>({
     darkMode: false,
@@ -3622,6 +5496,9 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [selectedUser, setSelectedUser] = useState<UserItem | null>(null);
   const [productLimit, setProductLimit] = useState(10);
   const [productCursorStack, setProductCursorStack] = useState<Array<string | null>>([null]);
+  const [productSearchDraft, setProductSearchDraft] = useState("");
+  const [productSearch, setProductSearch] = useState("");
+  const [pdvResetKey, setPdvResetKey] = useState(0);
   const [customerLimit, setCustomerLimit] = useState(10);
   const [customerCursorStack, setCustomerCursorStack] = useState<Array<string | null>>([null]);
   const [customerSearchDraft, setCustomerSearchDraft] = useState("");
@@ -3640,10 +5517,15 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [categorySearch, setCategorySearch] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
   const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<ProductItem | null>(null);
   const [operationalLimit, setOperationalLimit] = useState(10);
   const [operationalCursorStack, setOperationalCursorStack] = useState<Array<string | null>>([null]);
   const [operationalSearchDraft, setOperationalSearchDraft] = useState("");
   const [operationalSearch, setOperationalSearch] = useState("");
+  const [operationalStatusFilter, setOperationalStatusFilter] = useState("ALL");
+  const [ifoodOrdersView, setIfoodOrdersView] = useState<IfoodOrdersView>(tab === "ifood-pending" ? "pending" : "orders");
+  const [ifoodOrderStatusFilter, setIfoodOrderStatusFilter] = useState<IfoodOrderStatusFilter>("ALL");
+  const [readIfoodOrderNotificationIds, setReadIfoodOrderNotificationIds] = useState<string[]>([]);
   const productCursor = productCursorStack.at(-1) ?? null;
   const customerCursor = customerCursorStack.at(-1) ?? null;
   const supplierCursor = supplierCursorStack.at(-1) ?? null;
@@ -3656,10 +5538,11 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     queryFn: () => getMe(accessToken)
   });
   const productsQuery = useQuery<ProductListResponse>({
-    queryKey: ["products", accessToken, productLimit, productCursor],
-    queryFn: () => getProducts(accessToken, { limit: productLimit, cursor: productCursor }),
+    queryKey: ["products", accessToken, productLimit, productCursor, productSearch],
+    queryFn: () => getProducts(accessToken, { limit: productLimit, cursor: productCursor, search: productSearch }),
     enabled: tab === "products" || tab === "sales"
   });
+  const activeProducts = useMemo(() => (productsQuery.data?.data ?? []).filter((product) => product.active), [productsQuery.data?.data]);
   const balancesQuery = useQuery<StockBalanceListResponse>({
     queryKey: ["stock-balances", accessToken, inventoryLimit, inventoryCursor, inventorySearch],
     queryFn: () => getStockBalances(accessToken, { limit: inventoryLimit, cursor: inventoryCursor, search: inventorySearch }),
@@ -3683,8 +5566,14 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const productCategoriesQuery = useQuery<CategoryListResponse>({
     queryKey: ["product-categories", accessToken],
     queryFn: () => getCategories(accessToken, { limit: 100 }),
-    enabled: tab === "products" || productDialogOpen
+    enabled: tab === "products" || productDialogOpen || Boolean(ifoodCatalogLinkDialog)
   });
+  const ifoodLinkProductsQuery = useQuery<ProductListResponse>({
+    queryKey: ["ifood-link-products", accessToken],
+    queryFn: () => getProducts(accessToken, { limit: 100 }),
+    enabled: Boolean(ifoodCatalogLinkDialog)
+  });
+  const activeIfoodLinkProducts = useMemo(() => (ifoodLinkProductsQuery.data?.data ?? []).filter((product) => product.active), [ifoodLinkProductsQuery.data?.data]);
   const preferencesQuery = useQuery({
     queryKey: ["settings-preferences", accessToken],
     queryFn: () => getUserPreferences(accessToken)
@@ -3708,15 +5597,118 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     queryFn: () => getUsers(accessToken, { limit: operationalLimit, cursor: operationalCursor, search: operationalSearch }),
     enabled: tab === "users"
   });
+  const sidebarIfoodConnectionQuery = useQuery<GenericListResponse, Error>({
+    queryKey: ["sidebar-ifood-connection", accessToken],
+    queryFn: () => getPaginatedResource(accessToken, "/api/v1/integrations/connections", { limit: 10 }),
+    staleTime: 30000,
+    refetchInterval: 60000
+  });
+  const sidebarIfoodConnected = (sidebarIfoodConnectionQuery.data?.data ?? []).some((item) => textValue(asRecord(item)?.channel, "") === "IFOOD" && textValue(asRecord(item)?.status, "") === "CONNECTED");
+  const sidebarIfoodOrdersQuery = useQuery<GenericListResponse, Error>({
+    queryKey: ["sidebar-ifood-orders", accessToken],
+    queryFn: () => getIfoodOrders(accessToken, { limit: 10 }),
+    enabled: sidebarIfoodConnected,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false
+  });
+  const sidebarIfoodOrderNotifications = (sidebarIfoodOrdersQuery.data?.data ?? []).filter((item) => {
+    const status = normalizeIfoodOrderStatus(item);
+    return textValue(item.source, "") === "IFOOD" && status !== "COMPLETED" && status !== "CANCELLED";
+  });
+  const ifoodOrderNotificationStorageKey = `pulso:ifood-order-notifications-read:${meQuery.data?.tenant.branchId ?? "branch"}`;
+  const readIfoodOrderNotificationSet = new Set(readIfoodOrderNotificationIds);
+  const unreadIfoodOrderNotifications = sidebarIfoodOrderNotifications.filter((item) => {
+    const notificationId = ifoodOrderNotificationId(item);
+    return notificationId ? !readIfoodOrderNotificationSet.has(notificationId) : false;
+  });
+  const sidebarIfoodOrderNotificationCount = unreadIfoodOrderNotifications.length;
+  const sidebarIfoodOrderNotificationText = sidebarIfoodOrderNotificationCount > 0 ? "Pedido iFood recebido" : null;
+  const dashboardOnlineOrders = (sidebarIfoodOrdersQuery.data?.data ?? []).filter((item) => textValue(item.kind, "") !== "IFOOD_EVENT" && textValue(item.source, "") === "IFOOD");
+  const dashboardOnlineSalesTotal = dashboardOnlineOrders.reduce((sum, item) => sum + (Number(textValue(item.total, "0")) || 0), 0);
+  const dashboardLatestOnlineOrder = dashboardOnlineOrders[0];
+  const dashboardLatestOnlineOrderNumber = textValue(dashboardLatestOnlineOrder?.ifoodDisplayId, "");
+  const dashboardLatestOnlineOrderSummary = dashboardLatestOnlineOrder
+    ? `${dashboardLatestOnlineOrderNumber ? `#${dashboardLatestOnlineOrderNumber}` : "Pedido iFood"} · ${ifoodOrderProductSummary(dashboardLatestOnlineOrder)}`
+    : null;
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(ifoodOrderNotificationStorageKey);
+      const parsed = stored ? JSON.parse(stored) : [];
+      setReadIfoodOrderNotificationIds(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
+    } catch {
+      setReadIfoodOrderNotificationIds([]);
+    }
+  }, [ifoodOrderNotificationStorageKey]);
+
+  const markIfoodOrderNotificationsRead = useCallback(() => {
+    const currentIds = sidebarIfoodOrderNotifications.map(ifoodOrderNotificationId).filter((value): value is string => Boolean(value));
+    if (currentIds.length === 0) {
+      return;
+    }
+
+    setReadIfoodOrderNotificationIds((current) => {
+      const next = [...new Set([...current, ...currentIds])].slice(-100);
+      try {
+        window.localStorage.setItem(ifoodOrderNotificationStorageKey, JSON.stringify(next));
+      } catch {
+        // Ignore storage failures; the notification still closes for this render.
+      }
+      return next;
+    });
+  }, [ifoodOrderNotificationStorageKey, sidebarIfoodOrderNotifications]);
+
+  useEffect(() => {
+    setOperationalStatusFilter("ALL");
+  }, [tab]);
+
   const operationalQuery = useQuery<GenericListResponse, Error>({
     queryKey: ["operational-module", accessToken, tab, operationalLimit, operationalCursor, operationalSearch],
     queryFn: () =>
-      getPaginatedResource(accessToken, operationalConfig!.endpoint!, {
+      tab === "ifood-orders"
+        ? getIfoodOrders(accessToken, {
+            limit: operationalLimit,
+            cursor: operationalCursor,
+            search: operationalSearch
+          })
+        : tab === "ifood-catalog"
+          ? getIfoodCatalogItems(accessToken, {
+              limit: operationalLimit,
+              cursor: operationalCursor,
+              search: operationalSearch,
+              status: "unlinked"
+            })
+        : tab === "ifood-pending"
+          ? getIfoodPendingItems(accessToken, {
+              limit: operationalLimit,
+              cursor: operationalCursor,
+              search: operationalSearch
+            })
+        : getPaginatedResource(accessToken, operationalConfig!.endpoint!, {
+            limit: operationalLimit,
+            cursor: operationalCursor,
+            search: operationalSearch
+          }),
+    enabled: Boolean(operationalConfig?.endpoint),
+    refetchInterval: tab === "ifood-orders" || tab === "ifood-pending" ? 15000 : false,
+    refetchIntervalInBackground: false
+  });
+  const ifoodPendingInsideOrdersQuery = useQuery<GenericListResponse, Error>({
+    queryKey: ["ifood-orders-pending-items", accessToken, operationalLimit, operationalCursor, operationalSearch],
+    queryFn: () =>
+      getIfoodPendingItems(accessToken, {
         limit: operationalLimit,
         cursor: operationalCursor,
         search: operationalSearch
       }),
-    enabled: Boolean(operationalConfig?.endpoint)
+    enabled: tab === "ifood-orders",
+    refetchInterval: tab === "ifood-orders" ? 15000 : false,
+    refetchIntervalInBackground: false
+  });
+  const settingsIfoodConnectionQuery = useQuery<GenericListResponse, Error>({
+    queryKey: ["settings-ifood-connection", accessToken],
+    queryFn: () => getPaginatedResource(accessToken, "/api/v1/integrations/connections", { limit: 1 }),
+    enabled: tab === "settings"
   });
   const dashboardQuery = useQuery<DashboardResponse>({
     queryKey: ["dashboard", accessToken],
@@ -3840,6 +5832,26 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       });
     }
   });
+  const productUpdateMutation = useMutation({
+    mutationFn: ({ productId, input }: { productId: string; input: ProductEditInput }) => updateProduct(accessToken, productId, input),
+    onSuccess: async () => {
+      setEditingProduct(null);
+      setDetailsDialog(null);
+      await queryClient.invalidateQueries({ queryKey: ["products", accessToken] });
+      setAlert({
+        tone: "success",
+        title: "Produto atualizado.",
+        description: "Dados comerciais e preço são enviados ao iFood automaticamente. Se alterou a foto, sincronize o produto novamente."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível atualizar o produto.",
+        description: error instanceof Error ? error.message : "Revise os campos e tente novamente."
+      });
+    }
+  });
   const categoryCreateMutation = useMutation({
     mutationFn: ({ name }: { name: string }) => createCategory(accessToken, { name }),
     onSuccess: async () => {
@@ -3909,6 +5921,8 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       salePrice: string;
       costPrice?: string;
       categoryId?: string;
+      imageDataUrl?: string;
+      imageFileName?: string;
       barcodes: string[];
       initialStock?: { warehouseId: string; quantity: string };
       fiscalProfile?: ProductFiscalProfileInput;
@@ -3948,7 +5962,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   });
   const dismissAlert = useCallback(() => setAlert(null), []);
   const pdvSaleMutation = useMutation({
-    mutationFn: (input: { warehouseId: string; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => {
+    mutationFn: (input: { warehouseId: string; paymentMethod: SalePaymentMethod; items: Array<{ productId: string; quantity: string; unitPrice: string }> }) => {
       const total = input.items.reduce((sum, item) => sum + Number(item.quantity) * Number(item.unitPrice), 0);
       return createSale(accessToken, {
         warehouseId: input.warehouseId,
@@ -3956,13 +5970,15 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         discount: "0",
         idempotencyKey: `web:pdv:${Date.now()}`,
         items: input.items.map((item) => ({ ...item, discount: "0" })),
-        payments: [{ method: "PIX", amount: total.toFixed(2) }]
+        payments: [{ method: input.paymentMethod, amount: total.toFixed(2) }]
       });
     },
     onSuccess: async () => {
+      setPdvResetKey((current) => current + 1);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["products", accessToken] }),
         queryClient.invalidateQueries({ queryKey: ["stock-balances", accessToken] })
       ]);
       setAlert({
@@ -3979,8 +5995,294 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       });
     }
   });
+  const ifoodOauthCompleteMutation = useMutation({
+    mutationFn: ({ state, authorizationCode }: { state: IfoodOauthDialogState; authorizationCode: string }) =>
+      completeIfoodOauth(accessToken, state.connectionId, {
+        authorizationCode,
+        authorizationCodeVerifier: state.authorizationCodeVerifier,
+        mode: state.mode
+      }),
+    onSuccess: async () => {
+      setIfoodOauthDialog(null);
+      await queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] });
+      setAlert({
+        tone: "success",
+        title: "iFood conectado.",
+        description: "Esta loja já pode enviar produtos e estoque para o iFood."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível conectar o iFood.",
+        description: error instanceof Error ? error.message : "Confira se o código ainda está válido e tente novamente."
+      });
+    }
+  });
+  const ifoodStockSettingsMutation = useMutation({
+    mutationFn: ({ connectionId, input }: { connectionId: string; input: { ecommerceStockMode: "FULL" | "PERCENT" | "FIXED"; ecommerceStockPercent?: string | null; ecommerceStockFixedQuantity?: string | null } }) =>
+      updateIntegrationConnection(accessToken, connectionId, input),
+    onSuccess: async () => {
+      setIfoodStockSettingsDialog(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["settings-ifood-connection", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Regra de venda online salva.",
+        description: "A próxima sincronização enviará ao iFood apenas o estoque definido para esta loja."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível salvar estoque ecommerce.",
+        description: error instanceof Error ? error.message : "Revise a configuração e tente novamente."
+      });
+    }
+  });
+  const productIfoodSyncMutation = useMutation({
+    mutationFn: async ({ product }: { product: ProductItem }) => {
+      const readiness = productIfoodReadiness(product);
+      if (!readiness.ready) {
+        throw new Error(`Complete o cadastro antes de enviar: ${readiness.issues.join(", ")}.`);
+      }
+
+      const connections = await getPaginatedResource(accessToken, "/api/v1/integrations/connections", { limit: 10 });
+      const ifoodConnections = connections.data.filter((item) => textValue(asRecord(item)?.channel, "") === "IFOOD" && textValue(asRecord(item)?.externalAccountId, ""));
+      const connection =
+        ifoodConnections.find((item) => textValue(asRecord(item)?.status, "") === "CONNECTED") ??
+        ifoodConnections.find((item) => textValue(asRecord(item)?.status, "") === "ERROR");
+      const connectionId = textValue(asRecord(connection)?.id, "");
+      if (!connectionId) {
+        throw new Error("Conecte o iFood desta loja antes de enviar produtos.");
+      }
+
+      const result = await syncIfoodCatalog(accessToken, connectionId, { dryRun: false, limit: 1, productId: product.id });
+      return { productId: product.id, productName: product.name, result };
+    },
+    onSuccess: async ({ productName, result }) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["products", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] })
+      ]);
+      setAlert({
+        tone: result.summary.errors > 0 ? "warning" : "success",
+        title: result.summary.errors > 0 ? "Alguns dados precisam de ajuste." : "Produto enviado ao iFood.",
+        description:
+          result.summary.errors > 0
+            ? `${result.summary.errors} produto(s) não foram enviados. Abra o erro do produto e corrija o cadastro.`
+            : `${productName} foi atualizado no iFood com preço, foto e estoque.`
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível sincronizar com iFood.",
+        description: error instanceof Error ? error.message : "Confira se o iFood está conectado e se o produto tem categoria, código de barras e preço."
+      });
+    }
+  });
+  const ifoodCatalogItemMutation = useMutation({
+    mutationFn: async ({ item, source, mode, productId, categoryId }: { item: GenericListItem; source: "catalog" | "pending"; mode: "link" | "create"; productId?: string; categoryId?: string }) => {
+      const connections = await getPaginatedResource(accessToken, "/api/v1/integrations/connections", { limit: 10 });
+      const connection = connections.data.find((candidate) => textValue(asRecord(candidate)?.channel, "") === "IFOOD" && textValue(asRecord(candidate)?.status, "") === "CONNECTED");
+      const connectionId = textValue(asRecord(connection)?.id, "");
+      if (!connectionId) {
+        throw new Error("Conecte o iFood desta loja antes de vincular itens.");
+      }
+      const ifoodItemId = textValue(item.ifoodItemId, "");
+      if (!ifoodItemId) {
+        throw new Error("Item iFood sem identificador para vínculo.");
+      }
+      if (mode === "link") {
+        if (!productId) {
+          throw new Error("Selecione um produto do ERP para vincular.");
+        }
+        if (source === "pending") {
+          return resolveIfoodPendingItem(accessToken, connectionId, textValue(item.id, ""), { productId });
+        }
+        return linkIfoodCatalogItem(accessToken, connectionId, ifoodItemId, { productId });
+      }
+      if (source === "pending") {
+        throw new Error("Para pendências, selecione um produto existente do ERP.");
+      }
+      return createProductFromIfoodItem(accessToken, connectionId, ifoodItemId, {
+        ...(categoryId ? { categoryId } : {}),
+        sku: textValue(item.externalCode, ifoodItemId),
+        name: textValue(item.name, "Item iFood"),
+        description: textValue(item.description, undefined),
+        unit: textValue(item.unit, "UN"),
+        salePrice: Number(textValue(item.price, "0")) > 0 ? Number(textValue(item.price, "0")).toFixed(2) : "0.01",
+        ...(textValue(item.ean, "") ? { barcode: textValue(item.ean, "") } : {})
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["products", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["ifood-link-products", accessToken] })
+      ]);
+      const source = ifoodCatalogLinkDialog?.source;
+      setIfoodCatalogLinkDialog(null);
+      setAlert({
+        tone: "success",
+        title: source === "pending" ? "Pendência resolvida." : "Item iFood vinculado.",
+        description:
+          source === "pending"
+            ? "O produto foi vinculado e o estoque foi reservado ou baixado conforme o estado atual do pedido."
+            : "Os próximos pedidos poderão usar esse vínculo para reservar estoque."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível vincular item iFood.",
+        description: error instanceof Error ? error.message : "Confira o produto selecionado e tente novamente."
+      });
+    }
+  });
+  const ifoodOrderStatusMutation = useMutation({
+    mutationFn: ({ saleId, action }: { saleId: string; action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH" }) =>
+      runIfoodOrderAction(accessToken, saleId, { action }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] });
+      setAlert({
+        tone: "success",
+        title: "Etapa enviada ao iFood.",
+        description: "A tela muda de status quando o iFood retornar a notificação dessa etapa pelo polling."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível atualizar o pedido iFood.",
+        description: error instanceof Error ? error.message : "Tente novamente ou verifique o status no portal iFood."
+      });
+    }
+  });
+  const saleCancelMutation = useMutation({
+    mutationFn: ({ saleId, reason }: { saleId: string; reason: string }) =>
+      cancelSale(accessToken, saleId, {
+        reason,
+        idempotencyKey: `web:cancel-sale:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-balances", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Venda cancelada.",
+        description: "O histórico foi atualizado e o estoque foi devolvido quando aplicável."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível cancelar a venda.",
+        description: error instanceof Error ? error.message : "Confira o status da venda e tente novamente."
+      });
+    }
+  });
+  const purchaseReceiveMutation = useMutation({
+    mutationFn: ({ purchaseId }: { purchaseId: string }) =>
+      receivePurchase(accessToken, purchaseId, {
+        idempotencyKey: `web:receive-purchase:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-balances", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["products", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Compra recebida.",
+        description: "A entrada de estoque foi registrada e a compra saiu das pendências."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível receber a compra.",
+        description: error instanceof Error ? error.message : "Confira o status da compra e tente novamente."
+      });
+    }
+  });
+  const purchaseCancelMutation = useMutation({
+    mutationFn: ({ purchaseId, reason }: { purchaseId: string; reason: string }) => cancelPurchase(accessToken, purchaseId, { reason }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Compra cancelada.",
+        description: "A compra foi retirada das pendências operacionais."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível cancelar a compra.",
+        description: error instanceof Error ? error.message : "Compras já recebidas não podem ser canceladas por este fluxo."
+      });
+    }
+  });
+  const financialSettleMutation = useMutation({
+    mutationFn: ({ entryId, amount }: { entryId: string; amount: string }) =>
+      settleFinancialEntry(accessToken, entryId, {
+        paidAmount: amount,
+        paymentMethod: "PIX"
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Conta baixada.",
+        description: "O financeiro foi atualizado e a pendência saiu dos alertas quando aplicável."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível baixar a conta.",
+        description: error instanceof Error ? error.message : "Confira o valor e tente novamente."
+      });
+    }
+  });
+  const financialCancelMutation = useMutation({
+    mutationFn: ({ entryId, reason }: { entryId: string; reason: string }) => cancelFinancialEntry(accessToken, entryId, { reason }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Conta cancelada.",
+        description: "A pendência financeira foi retirada do acompanhamento."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível cancelar a conta.",
+        description: error instanceof Error ? error.message : "Contas já baixadas não podem ser canceladas por este fluxo."
+      });
+    }
+  });
   const operationalActionMutation = useMutation({
-    mutationFn: async ({ tab }: { tab: OperationalTab; item?: GenericListItem }) => {
+    mutationFn: async ({ tab, item }: { tab: OperationalTab; item?: GenericListItem }) => {
       const token = accessToken;
       const timestamp = Date.now();
       const suffix = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
@@ -4000,7 +6302,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }),
             getCustomers(token, { limit: 1 })
           ]);
-          const product = products.data[0];
+          const product = products.data.find((entry) => entry.active);
           const warehouse = warehouses.data[0];
           if (!product || !warehouse) {
             throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar venda.");
@@ -4022,7 +6324,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }),
             getSuppliers(token, { limit: 1 })
           ]);
-          const product = products.data[0];
+          const product = products.data.find((entry) => entry.active);
           const warehouse = warehouses.data[0];
           if (!product || !warehouse) {
             throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar compra.");
@@ -4039,7 +6341,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         }
         case "transfers": {
           const [products, warehouses, me] = await Promise.all([getProducts(token, { limit: 1 }), getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 }), getMe(token)]);
-          const product = products.data[0];
+          const product = products.data.find((entry) => entry.active);
           const warehouse = warehouses.data[0];
           if (!product || !warehouse) {
             throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar transferência.");
@@ -4055,7 +6357,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         }
         case "counts": {
           const [products, warehouses] = await Promise.all([getProducts(token, { limit: 1 }), getPaginatedResource(token, "/api/v1/warehouses", { limit: 1 })]);
-          const product = products.data[0];
+          const product = products.data.find((entry) => entry.active);
           const warehouse = warehouses.data[0];
           if (!product || !warehouse) {
             throw new Error("Cadastre ao menos 1 produto e 1 depósito ativo para criar inventário.");
@@ -4081,10 +6383,54 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           });
         }
         case "integrations": {
-          return createIntegrationConnection(token, {
-            channel: "MARKETPLACE",
-            externalAccountId: `marketplace-${suffix}`
-          });
+          const existingIfoodConnection = item ?? (await getPaginatedResource(token, "/api/v1/integrations/connections", { limit: 1 })).data[0];
+          const connection = existingIfoodConnection
+            ? existingIfoodConnection
+            : await createIntegrationConnection(token, {
+              channel: "IFOOD"
+            });
+
+          const connectionId = textValue(asRecord(connection)?.id, "");
+          const channel = textValue(asRecord(connection)?.channel, "");
+          const status = textValue(asRecord(connection)?.status, "DISCONNECTED");
+          if (!connectionId || channel !== "IFOOD") {
+            throw new Error("Selecione uma conexão iFood válida.");
+          }
+
+          if (status !== "CONNECTED") {
+            const oauthStart = await startIfoodOauth(token, connectionId, { mode: "GROCERIES" });
+            setIfoodOauthDialog({ ...oauthStart, connectionId });
+            window.open(oauthStart.verificationUrlComplete, "_blank", "noopener,noreferrer");
+            return { flow: "IFOOD_OAUTH_STARTED" };
+          }
+
+          return getIfoodIntegrationHealth(token, connectionId);
+        }
+        case "channels": {
+          const connectionId = textValue(asRecord(item)?.id, "");
+          const channel = textValue(asRecord(item)?.channel, "");
+          const status = textValue(asRecord(item)?.status, "DISCONNECTED");
+          if (!connectionId) {
+            throw new Error("Conecte o iFood desta loja antes de sincronizar.");
+          }
+          if (channel !== "IFOOD") {
+            throw new Error("Escolha uma loja iFood válida.");
+          }
+          if (status !== "CONNECTED") {
+            throw new Error("Conecte o iFood desta loja antes de enviar produtos.");
+          }
+          return syncIfoodCatalog(token, connectionId, { dryRun: false, limit: 1000 });
+        }
+        case "ifood-orders": {
+          const connections = await getPaginatedResource(token, "/api/v1/integrations/connections", { limit: 10 });
+          const connection = connections.data.find((candidate) => textValue(asRecord(candidate)?.channel, "") === "IFOOD" && textValue(asRecord(candidate)?.status, "") === "CONNECTED");
+          const connectionId = textValue(asRecord(connection)?.id, "");
+          if (!connectionId) {
+            throw new Error("Conecte o iFood desta loja antes de receber pedidos.");
+          }
+          const reprocessed = await reprocessIfoodEvents(token, connectionId, { limit: 50 });
+          const polled = await pollIfoodEvents(token, connectionId);
+          return { reprocessed, polled };
         }
         case "reports": {
           return createReportJob(token, {
@@ -4122,18 +6468,37 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           throw new Error("Ação primária ainda não está disponível para esta tela.");
       }
     },
-    onSuccess: async (_data, variables) => {
+    onSuccess: async (data, variables) => {
       await queryClient.invalidateQueries();
+      if (variables.tab === "integrations" && textValue(asRecord(data)?.flow, "") === "IFOOD_OAUTH_STARTED") {
+        setAlert({
+          tone: "info",
+          title: "Portal iFood aberto.",
+          description: "Depois de autorizar no iFood, volte aqui e cole o código exibido."
+        });
+        return;
+      }
+      if (variables.tab === "ifood-orders") {
+        const reprocessed = asRecord(data)?.reprocessed;
+        const polled = asRecord(data)?.polled;
+        setAlert({
+          tone: "success",
+          title: "Notificações iFood atualizadas.",
+          description: `Novos eventos: ${textValue(asRecord(polled)?.received, "0")}. Logs reavaliados: ${textValue(asRecord(reprocessed)?.processed, "0")}.`
+        });
+        return;
+      }
       setAlert({
         tone: "success",
         title: "Fluxo executado com sucesso.",
         description: `A ação principal da tela de ${operationalModules[variables.tab]?.title ?? "operação"} foi concluída no backend.`
       });
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      const isIfoodConnection = variables.tab === "integrations";
       setAlert({
         tone: "warning",
-        title: "Não foi possível concluir o fluxo.",
+        title: isIfoodConnection ? "Não foi possível conectar o iFood." : "Não foi possível concluir.",
         description: error instanceof Error ? error.message : "Verifique permissões, dados obrigatórios e tente novamente."
       });
     }
@@ -4152,8 +6517,16 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const warehouseOptions = useMemo(
     () =>
       (warehousesQuery.data?.data ?? [])
-        .map((item) => ({ id: String(item.id ?? ""), name: textValue(item.name, "Depósito") }))
-        .filter((item) => item.id),
+        .map((item) => {
+          const record = asRecord(item);
+          return {
+            id: textValue(record?.id, ""),
+            name: textValue(record?.name, "Depósito"),
+            active: record?.active !== false
+          };
+        })
+        .filter((item) => item.active && isEntityIdValue(item.id))
+        .map(({ id, name }) => ({ id, name })),
     [warehousesQuery.data?.data]
   );
 
@@ -4170,6 +6543,25 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   }, [settingsState.darkMode]);
 
   useEffect(() => {
+    if (tab !== "sales") {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      const nextSearch = productSearchDraft.trim();
+      setProductSearch((current) => {
+        if (current === nextSearch) {
+          return current;
+        }
+        setProductCursorStack([null]);
+        return nextSearch;
+      });
+    }, 250);
+
+    return () => window.clearTimeout(timeout);
+  }, [productSearchDraft, tab]);
+
+  useEffect(() => {
     if (!pricingSettingsQuery.data) {
       return;
     }
@@ -4181,25 +6573,64 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   }, [pricingSettingsQuery.data]);
 
   const focusContentAfterNavigation = useCallback(() => {
-    setSidebarCollapsed(settingsState.compactMenu);
     setOperationalCursorStack([null]);
     setOperationalSearchDraft("");
     setOperationalSearch("");
     window.requestAnimationFrame(() => {
       contentFocusRef.current?.focus();
     });
-  }, [settingsState.compactMenu]);
+  }, []);
+
+  const navigateWithinApp = useCallback((href: string) => {
+    const nextTab = tabFromPathname(href);
+    setContentTransitioning(true);
+    setActiveTab(nextTab);
+    if (window.location.pathname !== href) {
+      window.history.pushState(null, "", href);
+    }
+    focusContentAfterNavigation();
+    window.setTimeout(() => setContentTransitioning(false), 180);
+  }, [focusContentAfterNavigation]);
 
   useEffect(() => {
     if (pathname === "/") {
-      router.replace(tabRoutes.overview);
+      setActiveTab("overview");
+      window.history.replaceState(null, "", tabRoutes.overview);
       return;
     }
 
-    focusContentAfterNavigation();
-  }, [focusContentAfterNavigation, pathname, router]);
+    if (tabFromPathname(pathname) === "ifood-pending") {
+      setIfoodOrdersView("pending");
+      setActiveTab("ifood-orders");
+      window.history.replaceState(null, "", tabRoutes["ifood-orders"]);
+      return;
+    }
+
+    setActiveTab(tabFromPathname(pathname));
+  }, [pathname]);
+
+  useEffect(() => {
+    function handlePopState() {
+      setContentTransitioning(true);
+      setActiveTab(tabFromPathname(window.location.pathname));
+      focusContentAfterNavigation();
+      window.setTimeout(() => setContentTransitioning(false), 180);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [focusContentAfterNavigation]);
 
   function showUnavailableItem(item: SidebarItem) {
+    if (item.requiresIfood) {
+      setAlert({
+        tone: "warning",
+        title: "Configure o iFood primeiro.",
+        description: "Conecte a loja no módulo Config iFood para liberar itens, pedidos e demais rotinas do canal."
+      });
+      navigateWithinApp(tabRoutes.integrations);
+      return;
+    }
     if (item.status === "foundation") {
       setAlert({
         tone: "warning",
@@ -4217,15 +6648,6 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   }
 
   function runOperationalPrimaryAction(tabToRun: OperationalTab, item?: GenericListItem) {
-    if (tabToRun === "channels") {
-      setAlert({
-        tone: "info",
-        title: "Canal iFood/99 ainda não habilitado.",
-        description: "Essa área segue reservada para ativação futura dos conectores externos."
-      });
-      return;
-    }
-
     if (tabToRun === "global-search") {
       if (!operationalSearchDraft.trim()) {
         setAlert({
@@ -4240,13 +6662,62 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       return;
     }
 
+    if (tabToRun === "alerts" && item) {
+      const targetTab = textValue(item.targetTab, "");
+      const targetHref = targetTab && targetTab in tabRoutes ? tabRoutes[targetTab as DashboardTab] : tabRoutes.alerts;
+      navigateWithinApp(targetHref);
+      return;
+    }
+
     if (tabToRun === "payments" || tabToRun === "receivables") {
-      router.push(tabRoutes.sales);
+      navigateWithinApp(tabRoutes.sales);
+      return;
+    }
+
+    if (tabToRun === "sales-history") {
+      navigateWithinApp(tabRoutes.sales);
       return;
     }
 
     if (tabToRun === "payables") {
-      router.push(tabRoutes.purchases);
+      navigateWithinApp(tabRoutes.purchases);
+      return;
+    }
+
+    if (tabToRun === "integrations") {
+      operationalActionMutation.mutate({ tab: tabToRun, ...(item ? { item } : {}) });
+      return;
+    }
+
+    if (tabToRun === "ifood-catalog") {
+      if (item) {
+        setIfoodCatalogLinkDialog({ item, source: "catalog" });
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] });
+      setAlert({
+        tone: "success",
+        title: "Catálogo iFood atualizado.",
+        description: "A lista de itens do iFood será recarregada."
+      });
+      return;
+    }
+
+    if (tabToRun === "ifood-pending") {
+      if (item) {
+        setIfoodCatalogLinkDialog({ item, source: "pending" });
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] });
+      return;
+    }
+
+    if (tabToRun === "ifood-orders") {
+      if (ifoodOrdersView === "pending" && item) {
+        setIfoodCatalogLinkDialog({ item, source: "pending" });
+        return;
+      }
+      operationalActionMutation.mutate({ tab: tabToRun, ...(item ? { item } : {}) });
       return;
     }
 
@@ -4269,6 +6740,34 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       confirmLabel: config?.primaryAction ?? "Executar",
       onConfirm: () => operationalActionMutation.mutate({ tab: tabToRun, ...(item ? { item } : {}) })
     });
+  }
+
+  async function openOperationalDetails(item: GenericListItem) {
+    if (tab === "ifood-orders" && textValue(item.source) === "IFOOD") {
+      let details = item;
+      const hasIfoodOrderItems = Array.isArray(item.ifoodOrderItems) && item.ifoodOrderItems.length > 0;
+      if (!textValue(item.ifoodDisplayId, "") || !hasIfoodOrderItems) {
+        try {
+          const externalDetails = await getIfoodSaleExternalDetails(accessToken, item.id);
+          details = {
+            ...item,
+            ifoodDisplayId: textValue(externalDetails.displayId, ""),
+            ifoodOrderItems: Array.isArray(externalDetails.orderItems) ? externalDetails.orderItems : item.ifoodOrderItems,
+            ifoodPaymentMethods: Array.isArray(externalDetails.paymentMethods) ? externalDetails.paymentMethods : item.ifoodPaymentMethods
+          };
+        } catch {
+          details = item;
+        }
+      }
+      const displayId = textValue(details.ifoodDisplayId, "");
+      setDetailsDialog({
+        title: displayId ? `Pedido iFood #${displayId}` : "Pedido iFood",
+        data: details
+      });
+      return;
+    }
+
+    setDetailsDialog({ title: `${operationalConfig?.title ?? "Detalhes"}: ${textValue(item.name ?? item.id, "Registro")}`, data: item });
   }
 
   function toggleSetting(key: keyof SettingsState, checked: boolean) {
@@ -4345,6 +6844,18 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     });
   }
 
+  function confirmProductUpdate(product: ProductItem, input: ProductEditInput) {
+    setEditingProduct(null);
+    setConfirmAction({
+      title: "Salvar alterações do produto?",
+      description: "A foto e os dados comerciais serão atualizados no ERP. Se o produto já estiver no iFood, sincronize novamente para enviar a nova imagem.",
+      confirmLabel: "Salvar",
+      onConfirm: async () => {
+        await productUpdateMutation.mutateAsync({ productId: product.id, input });
+      }
+    });
+  }
+
   function createNewCategory() {
     const parsed = categoryFormSchema.safeParse({ name: newCategoryName });
     if (!parsed.success) {
@@ -4371,7 +6882,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     });
   }
 
-  function resetProductPagination(limit: number) {
+  function resetProductPagination(limit = productLimit) {
     setProductLimit(limit);
     setProductCursorStack([null]);
   }
@@ -4461,11 +6972,43 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     setOperationalCursorStack((current) => (current.length > 1 ? current.slice(0, -1) : current));
   }
 
+  const isOperationalActionPending =
+    operationalActionMutation.isPending ||
+    ifoodCatalogItemMutation.isPending ||
+    ifoodOrderStatusMutation.isPending ||
+    saleCancelMutation.isPending ||
+    purchaseReceiveMutation.isPending ||
+    purchaseCancelMutation.isPending ||
+    financialSettleMutation.isPending ||
+    financialCancelMutation.isPending ||
+    productIfoodSyncMutation.isPending;
+  const busyMessage =
+    operationalActionMutation.isPending && operationalActionMutation.variables?.tab === "ifood-orders"
+      ? "Atualizando notificações e logs do iFood..."
+      : ifoodCatalogItemMutation.isPending
+        ? "Salvando vínculo e ajustando estoque..."
+        : ifoodOrderStatusMutation.isPending
+          ? "Enviando etapa do pedido ao iFood..."
+        : saleCancelMutation.isPending
+          ? "Cancelando venda e ajustando estoque..."
+        : purchaseReceiveMutation.isPending
+          ? "Recebendo compra e registrando estoque..."
+        : purchaseCancelMutation.isPending
+          ? "Cancelando compra..."
+        : financialSettleMutation.isPending
+          ? "Baixando conta financeira..."
+        : financialCancelMutation.isPending
+          ? "Cancelando conta financeira..."
+          : productIfoodSyncMutation.isPending
+            ? "Sincronizando produto com o iFood..."
+            : "Salvando alteração...";
+
   return (
-    <main id="main" className="flex min-h-screen bg-background">
+    <main id="main" className="flex h-screen overflow-hidden bg-background">
       <AppSidebar
+        ref={sidebarRef}
         activeTab={tab}
-        onNavigate={focusContentAfterNavigation}
+        onNavigateTo={navigateWithinApp}
         onUnavailableItem={showUnavailableItem}
         companyName={companyName}
         branchName={branchName}
@@ -4474,6 +7017,10 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         activeBranchId={meQuery.data?.tenant.branchId}
         isSwitchingBranch={switchBranchMutation.isPending}
         onBranchChange={(branchId) => switchBranchMutation.mutate(branchId)}
+        ifoodConnected={sidebarIfoodConnected}
+        ifoodOrderNotificationCount={sidebarIfoodOrderNotificationCount}
+        ifoodOrderNotificationText={sidebarIfoodOrderNotificationText}
+        onIfoodOrderNotificationsRead={markIfoodOrderNotificationsRead}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
         onLogout={() =>
@@ -4488,17 +7035,8 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
       />
 
       <div
-        className={`relative min-w-0 flex-1 transition-[background-color,filter] duration-300 ease-[var(--ease-out)] ${
-          sidebarCollapsed ? "bg-background" : "bg-slate-100/70"
-        }`}
+        className="relative h-screen min-w-0 flex-1 overflow-y-auto bg-background transition-[background-color,filter] duration-300 ease-[var(--ease-out)]"
       >
-        <div
-          aria-hidden="true"
-          className={`pointer-events-none fixed inset-y-0 right-0 z-30 hidden bg-slate-950/5 backdrop-grayscale transition-opacity duration-300 ease-[var(--ease-out)] lg:block ${
-            sidebarCollapsed ? "opacity-0" : "opacity-100"
-          }`}
-          style={{ left: sidebarCollapsed ? "5rem" : "18rem" }}
-        />
         <header className="sticky top-0 z-20 border-b border-border bg-white/90 backdrop-blur-md">
           <div className="flex items-center gap-3 px-4 py-3">
             <button
@@ -4541,7 +7079,13 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           </div>
         </header>
 
-      <section ref={contentFocusRef} tabIndex={-1} className="mx-auto max-w-7xl px-4 py-6 outline-none">
+      <section
+        ref={contentFocusRef}
+        tabIndex={-1}
+        className={`mx-auto max-w-7xl px-4 py-6 outline-none transition-[opacity,transform,filter] duration-[180ms] ease-[var(--ease-out)] ${
+          contentTransitioning ? "translate-y-1 opacity-80 blur-[1px]" : "translate-y-0 opacity-100 blur-0"
+        }`}
+      >
         {tab === "overview" ? (
           <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
@@ -4561,7 +7105,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
               </button>
               <button
                 type="button"
-                onClick={() => router.push(tabRoutes.products)}
+                onClick={() => navigateWithinApp(tabRoutes.products)}
                 className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm font-medium transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
               >
                 <PackagePlus aria-hidden="true" size={16} />
@@ -4571,12 +7115,57 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           </div>
         ) : null}
 
-        <div className="mb-4 rounded-lg border border-border bg-white px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Tela atual</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {sidebarGroups.flatMap((group) => group.items).find((item) => item.tab === tab)?.label ?? "Painel"}
-          </p>
-        </div>
+        {tab === "overview" ? (
+          <div className="mb-4 grid gap-3 lg:grid-cols-[1fr_360px]">
+            <article className="rounded-lg border border-emerald-100 bg-white px-4 py-4 shadow-sm shadow-emerald-950/5">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Loja atual</p>
+              <div className="mt-3 flex min-w-0 items-center gap-3">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white">
+                  <Store aria-hidden="true" size={20} />
+                </span>
+                <div className="min-w-0">
+                  <h2 className="truncate text-base font-semibold text-slate-950">{branchName}</h2>
+                  <p className="truncate text-sm text-muted-foreground">{companyName}</p>
+                </div>
+              </div>
+            </article>
+
+            <article className="rounded-lg border border-border bg-white px-4 py-4 shadow-sm shadow-slate-950/5">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Vendas online</p>
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${sidebarIfoodConnected ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                  {sidebarIfoodConnected ? "iFood conectado" : "Não conectado"}
+                </span>
+              </div>
+              <p className="mt-3 text-2xl font-semibold tabular-nums text-slate-950">{money(dashboardOnlineSalesTotal)}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {sidebarIfoodOrdersQuery.isLoading
+                  ? "Carregando vendas online..."
+                  : dashboardOnlineOrders.length > 0
+                    ? `${numberFormatter.format(dashboardOnlineOrders.length)} pedido${dashboardOnlineOrders.length === 1 ? "" : "s"} iFood recente${dashboardOnlineOrders.length === 1 ? "" : "s"}`
+                    : sidebarIfoodConnected
+                      ? "Nenhuma venda online recente"
+                      : "Conecte o iFood para acompanhar aqui"}
+              </p>
+              {dashboardLatestOnlineOrderSummary ? (
+                <button
+                  type="button"
+                  onClick={() => navigateWithinApp(tabRoutes["ifood-orders"])}
+                  className="mt-3 block w-full truncate rounded-md border border-border bg-slate-50 px-3 py-2 text-left text-sm font-medium text-slate-700 transition-[transform,background-color] hover:bg-white active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                >
+                  {dashboardLatestOnlineOrderSummary}
+                </button>
+              ) : null}
+            </article>
+          </div>
+        ) : (
+          <div className="mb-4 rounded-lg border border-border bg-white px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Tela atual</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {sidebarGroups.flatMap((group) => group.items).find((item) => item.tab === tab)?.label ?? "Painel"}
+            </p>
+          </div>
+        )}
 
         {tab === "overview" ? (
           <>
@@ -4601,14 +7190,21 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                 </div>
                 <div className="divide-y divide-border">
                   {dashboardQuery.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando alertas...</p> : null}
-                  {dashboardQuery.data?.attention.map((item) => (
-                    <article key={item.title} className="flex min-w-0 items-start gap-3 px-4 py-4">
-                      <AlertTriangle aria-hidden="true" size={18} className={item.type === "OUT_OF_STOCK" ? "mt-0.5 text-red-600" : "mt-0.5 text-amber-500"} />
+                  {dashboardQuery.data?.attention.map((item, index) => (
+                    <article key={`${item.type}:${item.targetId ?? item.title}:${index}`} className="flex min-w-0 items-start gap-3 px-4 py-4">
+                      <AlertTriangle aria-hidden="true" size={18} className={item.type === "OUT_OF_STOCK" || item.type === "FINANCIAL_DUE" ? "mt-0.5 text-red-600" : item.type === "IFOOD_ORDER" ? "mt-0.5 text-emerald-600" : "mt-0.5 text-amber-500"} />
                       <div className="min-w-0 flex-1">
                         <h3 className="truncate text-sm font-medium">{item.title}</h3>
                         <p className="mt-1 text-sm text-muted-foreground">{item.detail}</p>
                       </div>
-                      <button type="button" className="rounded-md border border-border px-3 py-2 text-sm font-medium transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const targetHref = item.targetTab && item.targetTab in tabRoutes ? tabRoutes[item.targetTab as DashboardTab] : tabRoutes.alerts;
+                          navigateWithinApp(targetHref);
+                        }}
+                        className="rounded-md border border-border px-3 py-2 text-sm font-medium transition-transform duration-150 ease-[var(--ease-out)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
                         Ver
                       </button>
                     </article>
@@ -4648,12 +7244,48 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
 
         {tab === "products" ? (
           <section className="rounded-lg border border-border bg-white">
-            <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 border-b border-border px-4 py-3">
               <div>
                 <h2 className="text-base font-semibold">Produtos</h2>
                 <p className="text-sm text-muted-foreground">Pagina {productCursorStack.length}. Mostrando ate {productLimit} por tela.</p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <form
+                  className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row lg:max-w-2xl"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setProductSearch(productSearchDraft.trim());
+                    resetProductPagination();
+                  }}
+                >
+                  <label className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm focus-within:ring-2 focus-within:ring-emerald-500">
+                    <Search aria-hidden="true" size={16} className="text-muted-foreground" />
+                    <input
+                      value={productSearchDraft}
+                      onChange={(event) => setProductSearchDraft(event.target.value)}
+                      maxLength={120}
+                      placeholder="Buscar por nome, SKU ou EAN..."
+                      className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <button type="submit" className="rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-slate-800 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                      Buscar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProductSearchDraft("");
+                        setProductSearch("");
+                        resetProductPagination();
+                      }}
+                      className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                    >
+                      Limpar
+                    </button>
+                  </div>
+                </form>
+                <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setProductDialogOpen(true)}
@@ -4676,48 +7308,104 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
                     ))}
                   </select>
                 </label>
+                </div>
               </div>
             </div>
             <div className="divide-y divide-border">
               {productsQuery.isLoading ? <p className="px-4 py-5 text-sm text-muted-foreground">Carregando produtos...</p> : null}
-              {productsQuery.data?.data.map((product) => (
-                <article key={product.id} className="grid gap-3 px-4 py-4 sm:grid-cols-[1fr_120px_120px_240px_150px] sm:items-center">
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <h3 className="truncate text-sm font-medium">{product.name}</h3>
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${product.active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                        {product.active ? "Ativo" : "Inativo"}
-                      </span>
+              {productsQuery.error ? <p className="px-4 py-5 text-sm text-red-600">{productsQuery.error.message}</p> : null}
+              {activeProducts.map((product) => {
+                const ifoodReadiness = productIfoodReadiness(product);
+                const ifoodState = product.ifoodCatalogItems[0] ?? null;
+                const ifoodSynced = ifoodState?.status === "SYNCED";
+                const isSyncingThisProduct = productIfoodSyncMutation.isPending && productIfoodSyncMutation.variables?.product.id === product.id;
+                const ifoodStatusLabel = ifoodSynced ? "No iFood" : ifoodState?.status === "ERROR" ? "Erro iFood" : ifoodReadiness.ready ? "Pronto p/ iFood" : "Ajustar cadastro";
+                const ifoodStatusClass = ifoodSynced
+                  ? "bg-emerald-50 text-emerald-700"
+                  : ifoodState?.status === "ERROR"
+                    ? "bg-red-50 text-red-700"
+                  : ifoodReadiness.ready
+                    ? "bg-cyan-50 text-cyan-700"
+                    : "bg-amber-50 text-amber-700";
+                return (
+                  <article key={product.id} className="grid gap-3 px-4 py-4 lg:grid-cols-[minmax(220px,1fr)_120px_120px_180px_190px_120px] lg:items-center">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-slate-50">
+                        {product.imageDataUrl ? (
+                          <img src={product.imageDataUrl} alt="" className="h-full w-full object-cover" />
+                        ) : (
+                          <ImageIcon aria-hidden="true" size={18} className="text-slate-400" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <h3 className="truncate text-sm font-medium">{product.name}</h3>
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${product.active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                          {product.active ? "Ativo" : "Inativo"}
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {product.sku} · {product.category?.name ?? "Sem categoria"}
+                      </p>
+                      </div>
                     </div>
-                    <p className="text-sm text-muted-foreground">
-                      {product.sku} · {product.category?.name ?? "Sem categoria"}
-                    </p>
-                  </div>
-                  <p className="text-sm text-muted-foreground">{product.barcodes[0]?.barcode ?? "Sem EAN"}</p>
-                  <p className="text-sm font-medium tabular-nums">{money(product.branchPrices[0]?.salePrice ?? product.salePrice)}</p>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setDetailsDialog({ title: `Produto: ${product.name}`, data: product, variant: "product" })}
-                      title="Ver detalhes"
-                      aria-label="Ver detalhes"
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                    >
-                      <Eye aria-hidden="true" size={16} />
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 sm:justify-end">
-                    <span className="text-xs text-muted-foreground sm:hidden">Disponivel</span>
-                    <ModernSwitch
-                      checked={product.active}
-                      disabled={productStatusMutation.isPending}
-                      label={product.active ? `Desativar ${product.name}` : `Ativar ${product.name}`}
-                      onCheckedChange={(checked) => confirmProductStatus(product, checked)}
-                    />
-                  </div>
-                </article>
-              ))}
-              {productsQuery.data?.data.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">Nenhum produto encontrado.</p> : null}
+                    <p className="text-sm text-muted-foreground">{product.barcodes[0]?.barcode ?? "Sem EAN"}</p>
+                    <p className="text-sm font-medium tabular-nums">{money(product.branchPrices[0]?.salePrice ?? product.salePrice)}</p>
+                    <div className="min-w-0">
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${ifoodStatusClass}`}>{ifoodStatusLabel}</span>
+                      {ifoodState?.status === "ERROR" && ifoodState.lastError ? (
+                        <p className="mt-1 truncate text-xs text-red-600">{ifoodState.lastError}</p>
+                      ) : !ifoodReadiness.ready && !ifoodSynced ? (
+                        <p className="mt-1 truncate text-xs text-muted-foreground">{ifoodReadiness.issues.join(", ")}</p>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => productIfoodSyncMutation.mutate({ product })}
+                        title={ifoodSynced ? "Sincronizado com iFood" : ifoodReadiness.ready ? "Sincronizar com iFood" : `Ajuste antes de sincronizar: ${ifoodReadiness.issues.join(", ")}`}
+                        aria-label={ifoodSynced ? `${product.name} sincronizado com iFood` : `Sincronizar ${product.name} com iFood`}
+                        disabled={!ifoodReadiness.ready || productIfoodSyncMutation.isPending}
+                        className={`inline-flex h-9 w-9 items-center justify-center rounded-md border transition-[transform,border-color,background-color,color] duration-150 ease-[var(--ease-out)] active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                          ifoodSynced
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                            : "border-border bg-white text-slate-400 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+                        }`}
+                      >
+                        {isSyncingThisProduct ? <Loader2 aria-hidden="true" size={15} className="animate-spin" /> : <RefreshCw aria-hidden="true" size={15} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingProduct(product)}
+                        title="Editar produto"
+                        aria-label={`Editar ${product.name}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        <Pencil aria-hidden="true" size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDetailsDialog({ title: `Produto: ${product.name}`, data: product, variant: "product" })}
+                        title="Ver detalhes"
+                        aria-label="Ver detalhes"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                      >
+                        <Eye aria-hidden="true" size={16} />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 lg:justify-end">
+                      <span className="text-xs text-muted-foreground lg:hidden">Disponivel</span>
+                      <ModernSwitch
+                        checked={product.active}
+                        disabled={productStatusMutation.isPending}
+                        label={product.active ? `Desativar ${product.name}` : `Ativar ${product.name}`}
+                        onCheckedChange={(checked) => confirmProductStatus(product, checked)}
+                      />
+                    </div>
+                  </article>
+                );
+              })}
+              {!productsQuery.isLoading && activeProducts.length === 0 ? <p className="px-4 py-5 text-sm text-muted-foreground">Nenhum produto ativo encontrado.</p> : null}
             </div>
             <div className="flex flex-col gap-3 border-t border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-muted-foreground">
@@ -4921,6 +7609,8 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onSavePricing={savePricingConfig}
             isSavingPricing={pricingSettingsMutation.isPending}
             canManageFiscalPricing={canManagePricingSettings}
+            ifoodConnection={settingsIfoodConnectionQuery.data?.data[0] ?? null}
+            onConfigureIfoodStock={(connection) => setIfoodStockSettingsDialog({ connection })}
             onOpenAction={() => runOperationalPrimaryAction("settings")}
           />
         ) : null}
@@ -4953,8 +7643,30 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
 
         {tab === "sales" ? (
           <SalesPdvSection
-            products={productsQuery.data?.data ?? []}
+            products={activeProducts}
             warehouses={warehouseOptions}
+            productsIsLoading={productsQuery.isLoading}
+            productsIsFetching={productsQuery.isFetching}
+            productsError={productsQuery.error}
+            warehousesIsLoading={warehousesQuery.isLoading}
+            warehousesError={warehousesQuery.error}
+            searchDraft={productSearchDraft}
+            onSearchDraftChange={setProductSearchDraft}
+            onApplySearch={() => {
+              setProductSearch(productSearchDraft.trim());
+              resetProductPagination();
+            }}
+            onClearSearch={() => {
+              setProductSearchDraft("");
+              setProductSearch("");
+              resetProductPagination();
+            }}
+            page={productCursorStack.length}
+            hasNextPage={Boolean(productsQuery.data?.nextCursor)}
+            hasPreviousPage={productCursorStack.length > 1}
+            onNextPage={goToNextProductPage}
+            onPreviousPage={goToPreviousProductPage}
+            resetKey={pdvResetKey}
             isCreating={pdvSaleMutation.isPending}
             onCreateSale={(input) => pdvSaleMutation.mutate(input)}
           />
@@ -4982,12 +7694,121 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onPrevious={goToPreviousOperationalPage}
             onNext={goToNextOperationalPage}
             onPrimaryAction={(item) => runOperationalPrimaryAction(tab, item)}
-            onViewDetails={(item) => setDetailsDialog({ title: `${operationalConfig.title}: ${textValue(item.name ?? item.id, "Registro")}`, data: item })}
+            onViewDetails={(item) => void openOperationalDetails(item)}
+            onIfoodOrderAction={(saleId, action) => ifoodOrderStatusMutation.mutate({ saleId, action })}
+            onSaleCancel={(item) => {
+              const saleId = textValue(item.id, "");
+              setConfirmAction({
+                title: "Cancelar venda?",
+                description: "A venda será marcada como cancelada e o estoque será devolvido quando aplicável.",
+                confirmLabel: "Cancelar venda",
+                tone: "danger",
+                onConfirm: () => saleCancelMutation.mutate({ saleId, reason: "Cancelado pelo usuário no ERP" })
+              });
+            }}
+            onPurchaseReceive={(item) => {
+              const purchaseId = textValue(item.id, "");
+              setConfirmAction({
+                title: "Receber compra?",
+                description: "Os itens desta compra entrarão no estoque do depósito informado.",
+                confirmLabel: "Receber compra",
+                onConfirm: () => purchaseReceiveMutation.mutate({ purchaseId })
+              });
+            }}
+            onPurchaseCancel={(item) => {
+              const purchaseId = textValue(item.id, "");
+              setConfirmAction({
+                title: "Cancelar compra?",
+                description: "A compra será marcada como cancelada. Compras já recebidas não podem ser canceladas por este fluxo.",
+                confirmLabel: "Cancelar compra",
+                tone: "danger",
+                onConfirm: () => purchaseCancelMutation.mutate({ purchaseId, reason: "Cancelado pelo usuário no ERP" })
+              });
+            }}
+            onFinancialSettle={(item) => {
+              const entryId = textValue(item.id, "");
+              const amount = textValue(item.amount, "0");
+              setConfirmAction({
+                title: "Baixar conta?",
+                description: "A conta será marcada como quitada no financeiro. Juros, desconto e comprovante podem ser enviados pela API financeira.",
+                confirmLabel: "Baixar conta",
+                onConfirm: () => financialSettleMutation.mutate({ entryId, amount })
+              });
+            }}
+            onFinancialCancel={(item) => {
+              const entryId = textValue(item.id, "");
+              setConfirmAction({
+                title: "Cancelar conta financeira?",
+                description: "A conta será removida das pendências financeiras e dos alertas.",
+                confirmLabel: "Cancelar conta",
+                tone: "danger",
+                onConfirm: () => financialCancelMutation.mutate({ entryId, reason: "Cancelado pelo usuário no ERP" })
+              });
+            }}
+            ifoodOrdersView={ifoodOrdersView}
+            onIfoodOrdersViewChange={(view) => {
+              setIfoodOrdersView(view);
+              resetOperationalPagination();
+            }}
+            ifoodOrderStatusFilter={ifoodOrderStatusFilter}
+            onIfoodOrderStatusFilterChange={(status) => {
+              setIfoodOrderStatusFilter(status);
+              resetOperationalPagination();
+            }}
+            operationalStatusFilter={operationalStatusFilter}
+            onOperationalStatusFilterChange={(status) => {
+              setOperationalStatusFilter(status);
+              resetOperationalPagination();
+            }}
+            ifoodPendingQuery={ifoodPendingInsideOrdersQuery}
+            isActionPending={isOperationalActionPending}
           />
         ) : null}
       </section>
       </div>
       <ConfirmDialog action={confirmAction} onClose={() => setConfirmAction(null)} />
+      <IfoodOauthDialog
+        state={ifoodOauthDialog}
+        isSaving={ifoodOauthCompleteMutation.isPending}
+        onClose={() => setIfoodOauthDialog(null)}
+        onComplete={(authorizationCode) => {
+          if (!ifoodOauthDialog) {
+            return;
+          }
+          ifoodOauthCompleteMutation.mutate({ state: ifoodOauthDialog, authorizationCode });
+        }}
+      />
+      <IfoodStockSettingsDialog
+        state={ifoodStockSettingsDialog}
+        isSaving={ifoodStockSettingsMutation.isPending}
+        onClose={() => setIfoodStockSettingsDialog(null)}
+        onSave={(input) => {
+          const connectionId = textValue(asRecord(ifoodStockSettingsDialog?.connection)?.id, "");
+          if (!connectionId) {
+            return;
+          }
+          ifoodStockSettingsMutation.mutate({ connectionId, input });
+        }}
+      />
+      <IfoodCatalogLinkDialog
+        state={ifoodCatalogLinkDialog}
+        products={activeIfoodLinkProducts}
+        categories={productCategoriesQuery.data?.data ?? []}
+        isSaving={ifoodCatalogItemMutation.isPending}
+        onClose={() => setIfoodCatalogLinkDialog(null)}
+        onLink={(productId) => {
+          if (!ifoodCatalogLinkDialog) {
+            return;
+          }
+          ifoodCatalogItemMutation.mutate({ item: ifoodCatalogLinkDialog.item, source: ifoodCatalogLinkDialog.source, mode: "link", productId });
+        }}
+        onCreate={(categoryId) => {
+          if (!ifoodCatalogLinkDialog) {
+            return;
+          }
+          ifoodCatalogItemMutation.mutate({ item: ifoodCatalogLinkDialog.item, source: ifoodCatalogLinkDialog.source, mode: "create", ...(categoryId ? { categoryId } : {}) });
+        }}
+      />
       {alert ? <SystemAlert alert={alert} onDismiss={dismissAlert} /> : null}
       <ProductCreateDialog
         open={productDialogOpen}
@@ -4999,6 +7820,18 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         onClose={() => setProductDialogOpen(false)}
         onCreateCategory={(name) => categoryCreateMutation.mutateAsync({ name })}
         onSave={(input) => createProductMutation.mutate(input)}
+      />
+      <ProductEditDialog
+        product={editingProduct}
+        categories={productCategoriesQuery.data?.data ?? []}
+        isSaving={productUpdateMutation.isPending}
+        onClose={() => setEditingProduct(null)}
+        onSave={(input) => {
+          if (!editingProduct) {
+            return;
+          }
+          confirmProductUpdate(editingProduct, input);
+        }}
       />
       <DetailsDialog details={detailsDialog} pricingConfig={pricingConfig} onClose={() => setDetailsDialog(null)} />
       <UserAccessDialog
@@ -5014,6 +7847,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           userAccessMutation.mutate({ userId: selectedUser.id, ...input });
         }}
       />
+      {isOperationalActionPending ? <BusyOverlay message={busyMessage} /> : null}
     </main>
   );
 }

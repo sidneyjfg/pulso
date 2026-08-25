@@ -23,6 +23,15 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn()
   },
+  webhookEvent: {
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+    upsert: vi.fn(),
+    update: vi.fn()
+  },
+  warehouse: { findFirst: vi.fn() },
+  stockMovement: { findUnique: vi.fn(), create: vi.fn() },
+  stockBalance: { upsert: vi.fn(), updateMany: vi.fn() },
   reportJob: {
     findMany: vi.fn(),
     create: vi.fn()
@@ -30,7 +39,9 @@ const prismaMock = vi.hoisted(() => ({
   product: { findMany: vi.fn() },
   customer: { findMany: vi.fn() },
   supplier: { findMany: vi.fn() },
-  sale: { findMany: vi.fn() }
+  financialEntry: { findMany: vi.fn() },
+  sale: { findMany: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+  $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => callback(prismaMock))
 }));
 
 vi.mock("@erp/database", () => ({
@@ -118,6 +129,8 @@ describe("growth foundation security", () => {
 
   it("filters alerts by authenticated company and current branch", async () => {
     prismaMock.alert.findMany.mockResolvedValue([]);
+    prismaMock.financialEntry.findMany.mockResolvedValue([]);
+    prismaMock.sale.findMany.mockResolvedValue([]);
     const { buildApp } = await import("../app.js");
     const app = await buildApp();
 
@@ -201,6 +214,34 @@ describe("growth foundation security", () => {
     await app.close();
   });
 
+  it("prevents duplicate ifood connections for the current branch", async () => {
+    prismaMock.integrationConnection.findFirst.mockResolvedValue({ id: "connection_1" });
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/integrations/connections",
+      headers: { authorization: `Bearer ${await userToken(["integration.manage"])}` },
+      payload: {
+        channel: "IFOOD"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(prismaMock.integrationConnection.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          companyId: "company_1",
+          branchId: "branch_1",
+          channel: "IFOOD"
+        })
+      })
+    );
+    expect(prismaMock.integrationConnection.create).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("denies ifood connect without manage permission", async () => {
     prismaMock.integrationConnection.findFirst.mockResolvedValue({
       id: "connection_1",
@@ -223,6 +264,36 @@ describe("growth foundation security", () => {
     });
 
     expect(response.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("denies ifood event ingestion without manage permission", async () => {
+    const { buildApp } = await import("../app.js");
+    const app = await buildApp();
+    const token = await userToken(["integration.read"]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/integrations/connections/cjld2cjxh0000qzrmn831i7rn/ifood/events",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        events: [
+          {
+            externalEventId: "evt-1",
+            eventType: "order.placed",
+            order: {
+              externalOrderId: "order-1",
+              status: "CONFIRMED",
+              items: [{ productId: "cjld2cjxh0000qzrmn831i7ra", quantity: "1", unitPrice: "10.00", discount: "0" }]
+            }
+          }
+        ],
+        acknowledge: true
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(prismaMock.webhookEvent.upsert).not.toHaveBeenCalled();
     await app.close();
   });
 

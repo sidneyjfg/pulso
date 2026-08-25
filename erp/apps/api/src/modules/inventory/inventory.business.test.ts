@@ -58,7 +58,8 @@ const prismaMock = vi.hoisted(() => {
     },
     inventoryCountItem: {
       update: vi.fn()
-    }
+    },
+    $executeRaw: vi.fn()
   };
 
   type TxMock = typeof tx;
@@ -165,6 +166,7 @@ describe("inventory business flows", () => {
       currentQuantity: args.data.currentQuantity
     }));
     prismaMock.tx.stockBalance.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.tx.$executeRaw.mockResolvedValue(1);
   });
 
   it("sending a transfer creates TRANSFER_OUT movement and marks it in transit", async () => {

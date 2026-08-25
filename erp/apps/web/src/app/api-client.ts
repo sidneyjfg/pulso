@@ -45,9 +45,16 @@ export type ProductListResponse = {
     costPrice: string | null;
     salePrice: string;
     active: boolean;
+    imageDataUrl: string | null;
+    imageMimeType: string | null;
+    imageFileName: string | null;
+    imageSizeBytes: number | null;
+    imageUpdatedAt: string | null;
+    ifoodImagePath: string | null;
     category: { id: string; name: string } | null;
     barcodes: Array<{ id: string; barcode: string }>;
     branchPrices: Array<{ salePrice: string }>;
+    ifoodCatalogItems: Array<{ status: string; lastSyncedAt: string | null; lastError: string | null; ifoodItemId: string }>;
   }>;
   nextCursor: string | null;
 };
@@ -79,7 +86,8 @@ export type PersonListResponse = {
 export type StockBalanceListResponse = {
   data: Array<{
     id: string;
-    quantity: string;
+    quantity?: string;
+    reservedQuantity: string;
     updatedAt: string;
     warehouse: { id: string; name: string };
     product: { id: string; sku: string; name: string; unit: string };
@@ -160,27 +168,73 @@ export type DashboardResponse = {
     pendingPurchases: number;
   };
   attention: Array<{
-    type: "LOW_STOCK" | "OUT_OF_STOCK";
+    type: "LOW_STOCK" | "OUT_OF_STOCK" | "IFOOD_ORDER" | "FINANCIAL_DUE";
     title: string;
     detail: string;
     quantity: string;
-    product: { id: string; sku: string; name: string; unit: string };
-    warehouse: { id: string; name: string };
+    product?: { id: string; sku: string; name: string; unit: string };
+    warehouse?: { id: string; name: string };
+    targetTab?: string;
+    targetId?: string;
   }>;
   recentSales: Array<{
     id: string;
     total: string;
-    status: "COMPLETED" | "CANCELLED";
+    status: "PENDING" | "RESERVED" | "COMPLETED" | "CANCELLED";
     source: string;
     createdAt: string;
     customer: { id: string; name: string } | null;
   }>;
 };
 
+export type IfoodEventReprocessResponse = {
+  received?: number;
+  processed: number;
+  duplicates?: number;
+  failed: number;
+  createdSales?: number;
+  cancelledSales?: number;
+  ackedEventIds?: string[];
+  errors?: Array<{ externalEventId: string; message: string }>;
+  message?: string;
+};
+
+export type IfoodCatalogSyncResponse = {
+  summary: {
+    total: number;
+    synced: number;
+    errors: number;
+    dryRun: boolean;
+  };
+  items: Array<{
+    productId: string;
+    sku: string;
+    name: string;
+    barcode: string | null;
+    salePrice: string;
+    stock: string;
+    status: "READY" | "SYNCED" | "ERROR";
+    ifoodItemId: string | null;
+    issues: string[];
+  }>;
+};
+
+export type IfoodOauthStartResponse = {
+  userCode: string;
+  authorizationCodeVerifier: string;
+  verificationUrl: string;
+  verificationUrlComplete: string;
+  mode: "GROCERIES" | "RESTAURANT_PDV";
+};
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const error = (await response.json().catch(() => null)) as { message?: string } | null;
-    throw new Error(error?.message ?? "Não foi possível concluir a ação.");
+    const error = (await response.json().catch(() => null)) as { message?: string; issues?: Array<{ path?: string; message?: string }> } | null;
+    const issueMessage = error?.issues
+      ?.map((issue) => [issue.path, issue.message].filter(Boolean).join(": "))
+      .filter(Boolean)
+      .join(" ");
+    throw new Error(issueMessage || error?.message || "Não foi possível concluir a ação.");
   }
 
   return response.json() as Promise<T>;
@@ -252,11 +306,14 @@ export async function getMe(accessToken: string) {
   return parseResponse<MeResponse>(response);
 }
 
-export async function getProducts(accessToken: string, input: { limit?: number; cursor?: string | null } = {}) {
+export async function getProducts(accessToken: string, input: { limit?: number; cursor?: string | null; search?: string } = {}) {
   const search = new URLSearchParams();
   search.set("limit", String(input.limit ?? 10));
   if (input.cursor) {
     search.set("cursor", input.cursor);
+  }
+  if (input.search?.trim()) {
+    search.set("search", input.search.trim());
   }
 
   const response = await fetch(`${API_URL}/api/v1/products?${search.toString()}`, {
@@ -277,6 +334,33 @@ export async function updateProductActive(accessToken: string, productId: string
   });
 
   return parseResponse<{ id: string; active: boolean }>(response);
+}
+
+export async function updateProduct(
+  accessToken: string,
+  productId: string,
+  body: {
+    sku?: string;
+    name?: string;
+    unit?: string;
+    salePrice?: string;
+    costPrice?: string | null;
+    categoryId?: string | null;
+    imageDataUrl?: string | null;
+    imageFileName?: string | null;
+    active?: boolean;
+  }
+) {
+  const response = await fetch(`${API_URL}/api/v1/products/${productId}`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<GenericListItem>(response);
 }
 
 export async function getCategories(accessToken: string, input: { limit?: number; cursor?: string | null; search?: string } = {}) {
@@ -309,6 +393,8 @@ export async function createProduct(
     salePrice: string;
     costPrice?: string;
     categoryId?: string;
+    imageDataUrl?: string;
+    imageFileName?: string;
     barcodes?: string[];
     initialStock?: {
       warehouseId: string;
@@ -341,7 +427,7 @@ export async function updateCategoryActive(accessToken: string, categoryId: stri
   return parseResponse<{ id: string; name: string; active: boolean }>(response);
 }
 
-function paginatedSearchParams(input: { limit?: number; cursor?: string | null; search?: string }) {
+function paginatedSearchParams(input: { limit?: number; cursor?: string | null; search?: string } & Record<string, string | number | boolean | null | undefined>) {
   const search = new URLSearchParams();
   search.set("limit", String(input.limit ?? 10));
   if (input.cursor) {
@@ -349,6 +435,12 @@ function paginatedSearchParams(input: { limit?: number; cursor?: string | null; 
   }
   if (input.search?.trim()) {
     search.set("search", input.search.trim());
+  }
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "limit" || key === "cursor" || key === "search" || value === undefined || value === null || value === "") {
+      continue;
+    }
+    search.set(key, String(value));
   }
   return search;
 }
@@ -456,6 +548,185 @@ export async function getPaginatedResource(accessToken: string, path: `/api/v1/$
   return parseResponse<GenericListResponse>(response);
 }
 
+export async function getIfoodOrders(accessToken: string, input: { limit?: number; cursor?: string | null; search?: string } = {}) {
+  const salesResponse = await fetch(`${API_URL}/api/v1/sales?${paginatedSearchParams({ ...input, source: "IFOOD" }).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  const sales = await parseResponse<GenericListResponse>(salesResponse);
+
+  const connectionsResponse = await fetch(`${API_URL}/api/v1/integrations/connections?${paginatedSearchParams({ limit: 10 }).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  const connections = await parseResponse<GenericListResponse>(connectionsResponse);
+  const connection = connections.data.find((item) => item.channel === "IFOOD" && item.status === "CONNECTED") ?? connections.data.find((item) => item.channel === "IFOOD");
+  const connectionId = typeof connection?.id === "string" ? connection.id : "";
+
+  if (!connectionId) {
+    return sales;
+  }
+
+  const eventsResponse = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/events?${paginatedSearchParams({ limit: Math.max(input.limit ?? 25, 100), ...(input.search ? { search: input.search } : {}) }).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  const events = await parseResponse<GenericListResponse>(eventsResponse);
+  const orderStatusEvents = new Set(["PLACED", "CONFIRMED", "PREPARATION_STARTED", "READY_TO_PICKUP", "DISPATCHED", "CONCLUDED", "CANCELLED", "DELIVERED"]);
+  const latestEventByOrderId = new Map<string, GenericListItem>();
+  const latestStatusEventByOrderId = new Map<string, GenericListItem>();
+  for (const event of events.data) {
+    const payload = event.payload && typeof event.payload === "object" ? (event.payload as Record<string, unknown>) : {};
+    const metadata = payload.metadata && typeof payload.metadata === "object" ? (payload.metadata as Record<string, unknown>) : {};
+    const orderId = typeof payload.orderId === "string" ? payload.orderId : typeof metadata.id === "string" ? metadata.id : "";
+    if (orderId && !latestEventByOrderId.has(orderId)) {
+      latestEventByOrderId.set(orderId, event);
+    }
+    if (orderId && !latestStatusEventByOrderId.has(orderId) && typeof event.eventType === "string" && orderStatusEvents.has(event.eventType)) {
+      latestStatusEventByOrderId.set(orderId, event);
+    }
+  }
+  const saleData = sales.data.map((sale) => {
+    const idempotencyKey = typeof sale.idempotencyKey === "string" ? sale.idempotencyKey : "";
+    const orderId = idempotencyKey.startsWith("ifood:order:") ? idempotencyKey.split(":").at(-1) ?? "" : "";
+    const event = orderId ? latestStatusEventByOrderId.get(orderId) : undefined;
+    const lastEvent = orderId ? latestEventByOrderId.get(orderId) : undefined;
+    const eventType = typeof event?.eventType === "string" ? event.eventType : "";
+    const lastPayload = lastEvent?.payload && typeof lastEvent.payload === "object" ? (lastEvent.payload as Record<string, unknown>) : {};
+    return {
+      ...sale,
+      ifoodOrderId: orderId,
+      ifoodDisplayId: typeof lastPayload.orderDisplayId === "string" ? lastPayload.orderDisplayId : "",
+      ifoodOrderItems: Array.isArray(lastPayload.orderItems) ? lastPayload.orderItems : [],
+      ifoodPaymentMethods: Array.isArray(lastPayload.paymentMethods) ? lastPayload.paymentMethods : [],
+      ifoodOrderStatus: eventType || sale.status,
+      ifoodLastNotification: typeof lastEvent?.eventType === "string" ? lastEvent.eventType : ""
+    };
+  });
+  const enrichedSaleData = await Promise.all(
+    saleData.map(async (sale) => {
+      if (typeof sale.ifoodDisplayId === "string" && sale.ifoodDisplayId) {
+        return sale;
+      }
+      if (typeof sale.id !== "string") {
+        return sale;
+      }
+      try {
+        const details = await getIfoodSaleExternalDetails(accessToken, sale.id);
+        return {
+          ...sale,
+          ifoodDisplayId: typeof details.displayId === "string" ? details.displayId : sale.ifoodDisplayId,
+          ifoodOrderItems: Array.isArray(details.orderItems) ? details.orderItems : sale.ifoodOrderItems,
+          ifoodPaymentMethods: Array.isArray(details.paymentMethods) ? details.paymentMethods : sale.ifoodPaymentMethods
+        };
+      } catch {
+        return sale;
+      }
+    })
+  );
+  const visibleEvents = events.data
+    .filter((event) => event.status !== "PROCESSED" && event.status !== "DUPLICATE")
+    .map((event) => ({ ...event, kind: "IFOOD_EVENT" }));
+
+  return {
+    ...sales,
+    data: [...visibleEvents, ...enrichedSaleData],
+    nextCursor: sales.nextCursor
+  };
+}
+
+async function getConnectedIfoodConnectionId(accessToken: string) {
+  const connectionsResponse = await fetch(`${API_URL}/api/v1/integrations/connections?${paginatedSearchParams({ limit: 10 }).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  const connections = await parseResponse<GenericListResponse>(connectionsResponse);
+  const connection = connections.data.find((item) => item.channel === "IFOOD" && item.status === "CONNECTED") ?? connections.data.find((item) => item.channel === "IFOOD");
+  return typeof connection?.id === "string" ? connection.id : "";
+}
+
+export async function getIfoodCatalogItems(accessToken: string, input: { limit?: number; cursor?: string | null; search?: string; status?: "all" | "linked" | "unlinked" } = {}) {
+  const connectionId = await getConnectedIfoodConnectionId(accessToken);
+  if (!connectionId) {
+    return { data: [], nextCursor: null, summary: { total: 0, linked: 0, unlinked: 0 } };
+  }
+
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/catalog/items?${paginatedSearchParams({ limit: input.limit ?? 25, ...(input.search ? { search: input.search } : {}), status: input.status ?? "all" }).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+
+  return parseResponse<GenericListResponse>(response);
+}
+
+export async function getIfoodPendingItems(accessToken: string, input: { limit?: number; cursor?: string | null; search?: string } = {}) {
+  const connectionId = await getConnectedIfoodConnectionId(accessToken);
+  if (!connectionId) {
+    return { data: [], nextCursor: null };
+  }
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/pending-items?${paginatedSearchParams(input).toString()}`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  return parseResponse<GenericListResponse>(response);
+}
+
+export async function resolveIfoodPendingItem(accessToken: string, connectionId: string, pendingItemId: string, body: { productId: string }) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/pending-items/${pendingItemId}/resolve`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function runIfoodOrderAction(accessToken: string, saleId: string, body: { action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH" }) {
+  const response = await fetch(`${API_URL}/api/v1/sales/${saleId}/ifood/action`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function getIfoodSaleExternalDetails(accessToken: string, saleId: string) {
+  const response = await fetch(`${API_URL}/api/v1/sales/${saleId}/ifood/details`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function linkIfoodCatalogItem(accessToken: string, connectionId: string, ifoodItemId: string, body: { productId: string }) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/catalog/items/${encodeURIComponent(ifoodItemId)}/link`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function createProductFromIfoodItem(
+  accessToken: string,
+  connectionId: string,
+  ifoodItemId: string,
+  body: { categoryId?: string; sku?: string; name?: string; description?: string; unit?: string; costPrice?: string; salePrice?: string; barcode?: string }
+) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/catalog/items/${encodeURIComponent(ifoodItemId)}/create-product`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  return parseResponse<{ product: GenericListItem; mapping: GenericListItem }>(response);
+}
+
 export async function getDashboard(accessToken: string) {
   const response = await fetch(`${API_URL}/api/v1/dashboard`, {
     headers: { authorization: `Bearer ${accessToken}` }
@@ -508,7 +779,7 @@ export async function createSale(
   body: {
     customerId?: string;
     warehouseId: string;
-    source?: "MANUAL" | "POS" | "MARKETPLACE" | "ECOMMERCE" | "API" | "IMPORT" | "OTHER";
+    source?: "MANUAL" | "POS" | "IFOOD" | "FOOD99" | "MARKETPLACE" | "ECOMMERCE" | "API" | "IMPORT" | "OTHER";
     discount?: string;
     idempotencyKey: string;
     items: Array<{ productId: string; quantity: string; unitPrice: string; discount?: string }>;
@@ -530,6 +801,37 @@ export async function createPurchase(
   }
 ) {
   return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/purchases", body);
+}
+
+export async function cancelSale(accessToken: string, saleId: string, body: { reason: string; idempotencyKey: string }) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", `/api/v1/sales/${saleId}/cancel`, body);
+}
+
+export async function receivePurchase(accessToken: string, purchaseId: string, body: { idempotencyKey: string }) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", `/api/v1/purchases/${purchaseId}/receive`, body);
+}
+
+export async function cancelPurchase(accessToken: string, purchaseId: string, body: { reason: string }) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", `/api/v1/purchases/${purchaseId}/cancel`, body);
+}
+
+export async function settleFinancialEntry(
+  accessToken: string,
+  entryId: string,
+  body: {
+    paidAmount?: string;
+    interestAmount?: string;
+    discountAmount?: string;
+    paymentMethod?: "CASH" | "CREDIT_CARD" | "DEBIT_CARD" | "PIX" | "BANK_TRANSFER" | "VOUCHER" | "OTHER";
+    proofUrl?: string;
+    proofFileName?: string;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", `/api/v1/finance/entries/${entryId}/settle`, body);
+}
+
+export async function cancelFinancialEntry(accessToken: string, entryId: string, body: { reason: string }) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", `/api/v1/finance/entries/${entryId}/cancel`, body);
 }
 
 export async function createStockTransfer(
@@ -584,12 +886,132 @@ export async function createImportJob(
 export async function createIntegrationConnection(
   accessToken: string,
   body: {
-    channel: "MARKETPLACE" | "ECOMMERCE" | "POS" | "API" | "OTHER";
+    channel: "IFOOD";
     branchId?: string;
     externalAccountId?: string;
   }
 ) {
   return requestWithBody<GenericListItem, typeof body>(accessToken, "POST", "/api/v1/integrations/connections", body);
+}
+
+export async function updateIntegrationConnection(
+  accessToken: string,
+  connectionId: string,
+  body: {
+    status?: "DISCONNECTED" | "CONNECTED" | "ERROR" | "PAUSED";
+    externalAccountId?: string | null;
+    ecommerceStockMode?: "FULL" | "PERCENT" | "FIXED";
+    ecommerceStockPercent?: string | null;
+    ecommerceStockFixedQuantity?: string | null;
+  }
+) {
+  return requestWithBody<GenericListItem, typeof body>(accessToken, "PATCH", `/api/v1/integrations/connections/${connectionId}`, body);
+}
+
+export async function connectIfoodIntegration(
+  accessToken: string,
+  connectionId: string,
+  body: { merchantId: string; mode?: "GROCERIES" | "RESTAURANT_PDV" }
+) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/connect`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      merchantId: body.merchantId,
+      mode: body.mode ?? "GROCERIES"
+    })
+  });
+
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function startIfoodOauth(accessToken: string, connectionId: string, body: { mode?: "GROCERIES" | "RESTAURANT_PDV" } = {}) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/oauth/start`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ mode: body.mode ?? "GROCERIES" })
+  });
+
+  return parseResponse<IfoodOauthStartResponse>(response);
+}
+
+export async function completeIfoodOauth(
+  accessToken: string,
+  connectionId: string,
+  body: {
+    authorizationCode: string;
+    authorizationCodeVerifier: string;
+    merchantId?: string;
+    mode?: "GROCERIES" | "RESTAURANT_PDV";
+  }
+) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/oauth/complete`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      authorizationCode: body.authorizationCode,
+      authorizationCodeVerifier: body.authorizationCodeVerifier,
+      ...(body.merchantId ? { merchantId: body.merchantId } : {}),
+      mode: body.mode ?? "GROCERIES"
+    })
+  });
+
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function getIfoodIntegrationHealth(accessToken: string, connectionId: string) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/health`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  return parseResponse<GenericListItem>(response);
+}
+
+export async function syncIfoodCatalog(accessToken: string, connectionId: string, body: { dryRun?: boolean; limit?: number; productId?: string } = {}) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/catalog/sync`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      dryRun: body.dryRun ?? false,
+      limit: body.limit ?? 1000,
+      ...(body.productId ? { productId: body.productId } : {})
+    })
+  });
+
+  return parseResponse<IfoodCatalogSyncResponse>(response);
+}
+
+export async function reprocessIfoodEvents(accessToken: string, connectionId: string, body: { limit?: number } = {}) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/events/reprocess`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ limit: body.limit ?? 25 })
+  });
+
+  return parseResponse<IfoodEventReprocessResponse>(response);
+}
+
+export async function pollIfoodEvents(accessToken: string, connectionId: string) {
+  const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/events/poll`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+
+  return parseResponse<IfoodEventReprocessResponse>(response);
 }
 
 export async function createReportJob(

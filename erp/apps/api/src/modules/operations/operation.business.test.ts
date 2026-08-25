@@ -29,6 +29,10 @@ class DecimalMock {
     return this.value < Number(other);
   }
 
+  lessThanOrEqualTo(other: string | number | DecimalMock) {
+    return this.value <= Number(other);
+  }
+
   abs() {
     return new DecimalMock(Math.abs(this.value));
   }
@@ -51,9 +55,14 @@ const prismaMock = vi.hoisted(() => {
       findUniqueOrThrow: vi.fn()
     },
     purchase: {
+      create: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       findUniqueOrThrow: vi.fn()
+    },
+    financialEntry: {
+      create: vi.fn(),
+      updateMany: vi.fn()
     },
     purchaseItem: {
       updateMany: vi.fn()
@@ -65,7 +74,8 @@ const prismaMock = vi.hoisted(() => {
     stockBalance: {
       upsert: vi.fn(),
       updateMany: vi.fn()
-    }
+    },
+    $executeRaw: vi.fn()
   };
 
   type TxMock = typeof tx;
@@ -84,8 +94,7 @@ const prismaMock = vi.hoisted(() => {
     },
     purchase: {
       findMany: vi.fn(),
-      findUnique: vi.fn(),
-      create: vi.fn()
+      findUnique: vi.fn()
     },
     $transaction: vi.fn(async (callback: (tx: TxMock) => unknown) => callback(tx))
   };
@@ -161,7 +170,10 @@ function setupCommon() {
   prismaMock.tx.stockMovement.findUnique.mockResolvedValue(null);
   prismaMock.tx.stockBalance.upsert.mockResolvedValue({ id: "balance_1", quantity: new DecimalMock(10) });
   prismaMock.tx.stockBalance.updateMany.mockResolvedValue({ count: 1 });
+  prismaMock.tx.$executeRaw.mockResolvedValue(1);
   prismaMock.tx.stockMovement.create.mockResolvedValue({ id: "movement_1", currentQuantity: new DecimalMock(9) });
+  prismaMock.tx.financialEntry.create.mockResolvedValue({ id: "financial_1" });
+  prismaMock.tx.financialEntry.updateMany.mockResolvedValue({ count: 1 });
 }
 
 describe("operation business flows", () => {
@@ -182,7 +194,7 @@ describe("operation business flows", () => {
       id: "sale_1",
       items: [{ productId: "cm12345678901234567890123", quantity: new DecimalMock(2) }]
     });
-    prismaMock.tx.sale.findUniqueOrThrow.mockResolvedValue({ id: "sale_1", status: "COMPLETED" });
+    prismaMock.tx.sale.findUniqueOrThrow.mockResolvedValue({ id: "sale_1", status: "COMPLETED", total: new DecimalMock(20), customer: { name: "Cliente" }, items: [] });
     const { buildApp } = await import("../../app.js");
     const app = await buildApp();
 
@@ -250,7 +262,7 @@ describe("operation business flows", () => {
 
   it("purchase creation does not change stock", async () => {
     prismaMock.purchase.findUnique.mockResolvedValue(null);
-    prismaMock.purchase.create.mockResolvedValue({ id: "purchase_1", status: "ORDERED" });
+    prismaMock.tx.purchase.create.mockResolvedValue({ id: "purchase_1", status: "ORDERED", total: new DecimalMock(30), supplier: { name: "Fornecedor" } });
     const { buildApp } = await import("../../app.js");
     const app = await buildApp();
 

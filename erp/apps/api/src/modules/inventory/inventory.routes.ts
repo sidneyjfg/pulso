@@ -147,15 +147,21 @@ async function changeStock(
     throw errors.conflict("INSUFFICIENT_STOCK", "Estoque insuficiente.");
   }
 
-  const updated = await tx.stockBalance.updateMany({
-    where: {
-      id: balance.id,
-      ...(input.delta.lessThan(0) ? { quantity: { gte: input.delta.abs() } } : {})
-    },
-    data: { quantity: { increment: input.delta } }
-  });
+  const updated = input.delta.lessThan(0)
+    ? await tx.$executeRaw`
+        UPDATE StockBalance
+        SET quantity = quantity + ${input.delta}
+        WHERE id = ${balance.id}
+          AND quantity - reservedQuantity >= ${input.delta.abs()}
+      `
+    : (
+        await tx.stockBalance.updateMany({
+          where: { id: balance.id },
+          data: { quantity: { increment: input.delta } }
+        })
+      ).count;
 
-  if (updated.count !== 1) {
+  if (updated !== 1) {
     throw errors.conflict("INSUFFICIENT_STOCK", "Estoque insuficiente.");
   }
 
@@ -200,6 +206,7 @@ export async function inventoryRoutes(app: FastifyInstance) {
       select: {
         id: true,
         quantity: true,
+        reservedQuantity: true,
         updatedAt: true,
         warehouse: { select: { id: true, name: true } },
         product: { select: { id: true, sku: true, name: true, unit: true } }

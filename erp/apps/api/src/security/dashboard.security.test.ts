@@ -34,6 +34,9 @@ const prismaMock = vi.hoisted(() => ({
   },
   purchase: {
     count: vi.fn()
+  },
+  financialEntry: {
+    findMany: vi.fn()
   }
 }));
 
@@ -113,6 +116,7 @@ describe("dashboard security", () => {
     prismaMock.purchase.count.mockResolvedValue(0);
     prismaMock.stockBalance.findMany.mockResolvedValue([]);
     prismaMock.sale.findMany.mockResolvedValue([]);
+    prismaMock.financialEntry.findMany.mockResolvedValue([]);
   });
 
   it("requires both sales and inventory permissions", async () => {

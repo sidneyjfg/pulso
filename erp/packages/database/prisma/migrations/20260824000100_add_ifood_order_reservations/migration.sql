@@ -1,0 +1,6 @@
+-- AlterEnum
+ALTER TABLE `Sale` MODIFY `status` ENUM('RESERVED', 'COMPLETED', 'CANCELLED') NOT NULL DEFAULT 'COMPLETED';
+
+-- AlterTable
+ALTER TABLE `StockBalance`
+  ADD COLUMN `reservedQuantity` DECIMAL(15, 3) NOT NULL DEFAULT 0;
