@@ -226,34 +226,34 @@ body {
 
 .dark .app-sidebar-shell {
   background:
-    radial-gradient(circle at 18% 0%, rgba(16, 185, 129, 0.08), transparent 28%),
-    linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border-color: #d1fae5 !important;
+    radial-gradient(circle at 18% 0%, rgba(16, 185, 129, 0.14), transparent 30%),
+    linear-gradient(180deg, #111c2f 0%, #0b1220 100%);
+  border-color: rgba(71, 85, 105, 0.72) !important;
 }
 
 .dark .app-sidebar-shell .bg-white {
-  background-color: #ffffff !important;
+  background-color: #0f172a !important;
 }
 
 .dark .app-sidebar-shell .bg-slate-50 {
-  background-color: #f8fafc !important;
+  background-color: #0b1220 !important;
 }
 
 .dark .app-sidebar-shell .border-border,
 .dark .app-sidebar-shell .border-emerald-100 {
-  border-color: #e2e8f0 !important;
+  border-color: rgba(71, 85, 105, 0.62) !important;
 }
 
 .dark .app-sidebar-shell .text-slate-950 {
-  color: #020617 !important;
+  color: #f8fafc !important;
 }
 
 .dark .app-sidebar-shell .text-slate-700 {
-  color: #334155 !important;
+  color: #cbd5e1 !important;
 }
 
 .dark .app-sidebar-shell .text-muted-foreground {
-  color: #64748b !important;
+  color: #94a3b8 !important;
 }
 
 .dark .text-emerald-700,

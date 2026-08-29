@@ -28,6 +28,7 @@ O projeto ja possui base para:
 - clientes, fornecedores, vendas, compras e pagamentos;
 - dashboard operacional;
 - fiscal estrutural sem emissao de NF-e/NFC-e;
+- integracao iFood por aplicativo distribuido, polling, catalogo, pedidos e pendencias de vinculo;
 - documentacao Markdoc em `/docs`.
 
 A primeira versao nao emite NF-e ou NFC-e. A estrutura fiscal existe para permitir essa evolucao sem reescrever o nucleo.
@@ -159,7 +160,7 @@ corepack pnpm db:seed
 corepack pnpm dev
 ```
 
-## Com container
+## Com container local
 
 O compose atual sobe Redis. MySQL continua sendo a sua instancia externa.
 
@@ -174,6 +175,36 @@ Para derrubar a infraestrutura do projeto:
 ```bash
 corepack pnpm dev:infra:down
 ```
+
+## Docker de producao
+
+O `docker-compose.yml` esta estruturado para rodar a aplicacao por imagens publicadas no GHCR e deixa o modo de build interno comentado em cada servico.
+
+Modo imagem:
+
+```bash
+ERP_VERSION=0.1.0 docker compose up -d
+```
+
+Variaveis para trocar os nomes das imagens:
+
+```env
+ERP_API_IMAGE=ghcr.io/sua-org/pulso-erp-api:0.1.0
+ERP_WORKER_IMAGE=ghcr.io/sua-org/pulso-erp-worker:0.1.0
+ERP_WEB_IMAGE=ghcr.io/sua-org/pulso-erp-web:0.1.0
+```
+
+Modo build interno:
+
+1. Comente `image:` no servico desejado.
+2. Descomente o bloco `build:` correspondente.
+3. Rode `docker compose up -d --build`.
+
+Em producao, use `NODE_ENV=production`, `COOKIE_SECURE=true`, segredos reais para JWT/encryptacao, `DATABASE_URL` apontando para MySQL gerenciado ou externo e tags de imagem imutaveis. O servico `web` nao recebe `.env` completo para evitar exposicao desnecessaria de segredos no container frontend.
+
+## Atualizacoes sem parada
+
+Para reduzir impacto em cliente, publique imagens versionadas, aplique migrations compativeis com a versao anterior, suba a nova imagem e espere `/health` e `/ready` ficarem saudaveis antes de trocar trafego. Para zero downtime real, rode pelo menos duas instancias atras de proxy/load balancer; com Compose simples, a troca com `docker compose pull && docker compose up -d --no-deps api worker web` reduz a janela, mas ainda pode reiniciar containers individualmente.
 
 ## Scripts principais
 

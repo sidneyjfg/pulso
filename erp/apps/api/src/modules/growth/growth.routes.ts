@@ -2900,13 +2900,41 @@ export async function growthRoutes(app: FastifyInstance) {
         status: true,
         lastError: true,
         createdAt: true,
-        sale: { select: { id: true, status: true, total: true, createdAt: true } }
+        sale: { select: { id: true, status: true, total: true, createdAt: true, idempotencyKey: true } }
       },
       orderBy: { createdAt: "desc" },
       ...pagination(query)
     });
 
-    return paginated(items, query.limit);
+    const page = paginated(items, query.limit);
+    const orderIds = page.data.map((item) => item.ifoodOrderId).filter((value): value is string => Boolean(value));
+    if (orderIds.length === 0) {
+      return page;
+    }
+
+    const events = await prisma.webhookEvent.findMany({
+      where: {
+        companyId: request.tenant!.companyId,
+        channel: "IFOOD",
+        OR: orderIds.flatMap((orderId) => [{ payload: { path: "$.orderId", equals: orderId } }, { payload: { path: "$.metadata.id", equals: orderId } }])
+      },
+      select: { payload: true },
+      orderBy: { createdAt: "desc" }
+    });
+    const displayByOrderId = new Map<string, string>();
+    for (const event of events) {
+      const payload = recordValue(event.payload);
+      const orderId = textValue(payload.orderId) ?? textValue(recordValue(payload.metadata).id);
+      const displayId = textValue(payload.orderDisplayId);
+      if (orderId && displayId && !displayByOrderId.has(orderId)) {
+        displayByOrderId.set(orderId, displayId);
+      }
+    }
+
+    return {
+      ...page,
+      data: page.data.map((item) => ({ ...item, ifoodDisplayId: displayByOrderId.get(item.ifoodOrderId) ?? null }))
+    };
   });
 
   app.get("/api/v1/sales/:id/ifood/details", { preHandler: [app.authenticateUser] }, async (request) => {

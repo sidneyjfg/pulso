@@ -5,7 +5,7 @@ Vendas baixam estoque. Compras so aumentam estoque no recebimento.
 ## Vendas
 
 {% endpoint method="GET" path="/api/v1/sales" %}
-Lista vendas da loja ativa.
+Lista vendas da loja ativa. A resposta inclui `saleNumber`; vendas originadas no iFood tambem podem trazer `ifoodOrderId`, `ifoodDisplayId`, `ifoodLastEventType` e `ifoodTerminalStatus`.
 {% /endpoint %}
 
 {% endpoint method="POST" path="/api/v1/sales" %}
@@ -59,6 +59,10 @@ Cancela compra ainda nao recebida.
 
 Vendas e compras aceitam `idempotencyKey` para evitar duplicidade em retries.
 
+## Numeracao de vendas
+
+`saleNumber` e um numero sequencial gerado pelo banco para exibicao operacional. O identificador tecnico continua sendo `id`, e integracoes/retries continuam usando `idempotencyKey`.
+
 ## Pedidos iFood (fase 2)
 
 Aplicativo iFood distribuido usa polling. A API tambem inicia polling automatico quando `IFOOD_ENABLED=true`.
@@ -93,4 +97,20 @@ Cria um produto ERP a partir do item iFood e salva o vinculo para processar pedi
 
 {% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/catalog/sync" %}
 Sincroniza catalogo iFood da loja ativa com validacao de codigo de barras, preco e estoque por produto.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/integrations/connections/:id/ifood/pending-items" %}
+Lista itens de pedidos iFood que chegaram sem vinculo com produto ERP. A resposta inclui dados da venda relacionada e `ifoodDisplayId` quando esse identificador foi recebido nos eventos do iFood.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/integrations/connections/:id/ifood/pending-items/:pendingItemId/resolve" %}
+Vincula a pendencia a um produto ERP, reserva o estoque e conclui o fluxo quando nao houver mais itens pendentes.
+{% /endpoint %}
+
+{% endpoint method="GET" path="/api/v1/sales/:id/ifood/details" %}
+Busca detalhes atuais do pedido diretamente no iFood para uma venda da loja ativa com origem `IFOOD`.
+{% /endpoint %}
+
+{% endpoint method="POST" path="/api/v1/sales/:id/ifood/transition" %}
+Executa uma transicao permitida no pedido iFood associado a venda, como confirmar ou avancar o status operacional.
 {% /endpoint %}

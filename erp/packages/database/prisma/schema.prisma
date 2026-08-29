@@ -377,6 +377,7 @@ model InventoryCountItem {
 
 model Sale {
   id             String     @id @default(cuid())
+  saleNumber     Int        @default(autoincrement()) @unique
   companyId      String
   branchId       String
   warehouseId    String

@@ -394,6 +394,7 @@ async function releaseReservedStock(
 
 const saleSelect = {
   id: true,
+  saleNumber: true,
   status: true,
   subtotal: true,
   discount: true,

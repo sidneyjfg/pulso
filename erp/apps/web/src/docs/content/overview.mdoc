@@ -4,7 +4,7 @@ Pulso e um ERP SaaS para pequenos negocios brasileiros que precisam enxergar ven
 
 A promessa do produto e dar ao dono da empresa o pulso da operacao antes do fechamento do mes: o que vendeu hoje, quais produtos estao acabando, qual loja precisa de atencao, quais compras ainda nao viraram estoque e quais dados fiscais podem ser resolvidos depois.
 
-Internamente, o sistema nasce preparado para organizacoes, empresas, lojas, depositos, usuarios, permissoes, estoque por ledger, auditoria e integracoes futuras. Na interface, essa complexidade deve aparecer como linguagem simples: minha empresa, minha loja, meu estoque e minhas vendas.
+Internamente, o sistema nasce preparado para organizacoes, empresas, lojas, depositos, usuarios, permissoes, estoque por ledger, auditoria e integracoes. Na interface, essa complexidade deve aparecer como linguagem simples: minha empresa, minha loja, meu estoque e minhas vendas.
 
 Esta documentacao descreve o backend atual do Pulso. Ela e escrita em Markdoc e organizada por dominio, seguindo a mesma divisao usada na API.
 
@@ -18,7 +18,7 @@ Esta documentacao descreve o backend atual do Pulso. Ela e escrita em Markdoc e 
 ## O que esta fora desta versao
 
 - Emissao de NF-e e NFC-e.
-- Integracoes reais com iFood, 99Food e marketplaces.
+- Integracoes reais com 99Food e marketplaces.
 - Processos administrativos globais completos de planos e assinaturas.
 
 Esses pontos estao previstos na arquitetura, mas nao fazem parte do escopo funcional atual.
@@ -57,6 +57,7 @@ Opcional. Quando ausente, a API gera um identificador de correlacao por request.
 | Operacao | `/api/v1/sales`, `/api/v1/purchases` | Implementado |
 | Dashboard | `/api/v1/dashboard` | Implementado |
 | Fiscal | `/api/v1/fiscal` | Implementado, sem emissao de nota |
+| Integracoes iFood | `/api/v1/integrations/connections` | Implementado para aplicativo distribuido |
 
 ## Padrao de resposta paginada
 
