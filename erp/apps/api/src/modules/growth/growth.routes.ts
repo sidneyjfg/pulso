@@ -31,9 +31,11 @@ import {
   createIfoodCategory,
   getIfoodOrderDetails,
   healthCheckIfoodMerchant,
+  listIfoodCancellationReasons,
   listIfoodSellableItems,
   pollIfoodOrderEvents,
   publishSimpleIfoodItem,
+  requestIfoodCancellation,
   resolveIfoodAccessToken,
   startIfoodDeviceAuthorization,
   transitionIfoodOrder,
@@ -1005,7 +1007,7 @@ async function finalizeIfoodReservedSale(
 
 async function resolveIfoodPendingItem(
   tx: Prisma.TransactionClient,
-  input: { companyId: string; branchId: string; pendingItemId: string; productId: string; userId: string }
+  input: { companyId: string; branchId: string; pendingItemId: string; productId: string; userId: string; saveCatalogMapping: boolean }
 ) {
   const pending = await tx.ifoodOrderPendingItem.findFirst({
     where: { id: input.pendingItemId, companyId: input.companyId, branchId: input.branchId, status: "PENDING_LINK" },
@@ -1015,6 +1017,8 @@ async function resolveIfoodPendingItem(
       saleItemId: true,
       integrationConnectionId: true,
       ifoodOrderId: true,
+      ifoodItemId: true,
+      externalCode: true,
       quantity: true,
       name: true,
       sale: { select: { id: true, status: true, warehouseId: true } }
@@ -1029,10 +1033,55 @@ async function resolveIfoodPendingItem(
 
   const product = await tx.product.findFirst({
     where: { id: input.productId, companyId: input.companyId, active: true },
-    select: { id: true }
+    select: { id: true, sku: true }
   });
   if (!product) {
     throw errors.notFound("PRODUCT_NOT_FOUND", "Produto não encontrado para resolver pendência.");
+  }
+
+  if (input.saveCatalogMapping) {
+    const existingProductMapping = await tx.ifoodCatalogItem.findUnique({
+      where: {
+        integrationConnectionId_productId: {
+          integrationConnectionId: pending.integrationConnectionId,
+          productId: product.id
+        }
+      },
+      select: { ifoodItemId: true }
+    });
+    if (existingProductMapping && existingProductMapping.ifoodItemId !== pending.ifoodItemId) {
+      throw errors.conflict("IFOOD_PRODUCT_ALREADY_LINKED", "Este produto ERP já está vinculado a outro item iFood nesta loja.");
+    }
+
+    await tx.ifoodCatalogItem.upsert({
+      where: {
+        integrationConnectionId_ifoodItemId: {
+          integrationConnectionId: pending.integrationConnectionId,
+          ifoodItemId: pending.ifoodItemId
+        }
+      },
+      create: {
+        companyId: input.companyId,
+        branchId: input.branchId,
+        integrationConnectionId: pending.integrationConnectionId,
+        productId: product.id,
+        ifoodCategoryId: "",
+        ifoodItemId: pending.ifoodItemId,
+        ifoodProductId: pending.ifoodItemId,
+        externalCode: pending.externalCode || product.sku,
+        status: "SYNCED",
+        lastSyncedAt: new Date(),
+        lastError: null
+      },
+      update: {
+        productId: product.id,
+        ifoodProductId: pending.ifoodItemId,
+        externalCode: pending.externalCode || product.sku,
+        status: "SYNCED",
+        lastSyncedAt: new Date(),
+        lastError: null
+      }
+    });
   }
 
   await reserveStock(tx, {
@@ -1437,7 +1486,7 @@ async function ingestIfoodOrderEvents(input: {
     if (existing?.status === "PROCESSED" || existing?.status === "DUPLICATE") {
       await prisma.webhookEvent.update({
         where: { id: existing.id },
-        data: { status: "DUPLICATE", attempts: { increment: 1 } }
+        data: { attempts: { increment: 1 } }
       });
       summary.duplicates += 1;
       if (input.acknowledge) {
@@ -1668,47 +1717,71 @@ export async function pollConnectedIfoodOrdersOnce(input: { logger?: FastifyBase
   return total;
 }
 
-function startIfoodOrderPolling(app: FastifyInstance) {
-  if (!config.IFOOD_ENABLED || config.IFOOD_ORDER_POLLING_ENABLED === false) {
-    return null;
+async function resolveIfoodSaleActionContext(input: { saleId: string; companyId: string; branchId: string }) {
+  const sale = await prisma.sale.findFirst({
+    where: { id: input.saleId, companyId: input.companyId, branchId: input.branchId, source: "IFOOD" },
+    select: { id: true, status: true, idempotencyKey: true }
+  });
+  if (!sale) {
+    throw errors.notFound("IFOOD_SALE_NOT_FOUND", "Pedido iFood não encontrado.");
+  }
+  if (sale.status === "CANCELLED" || sale.status === "COMPLETED") {
+    throw errors.conflict("IFOOD_SALE_CLOSED", "Pedido iFood já está encerrado.");
   }
 
-  let running = false;
-  const poll = async () => {
-    if (running) {
-      return;
-    }
-    running = true;
-    try {
-      const result = await pollConnectedIfoodOrdersOnce({ logger: app.log });
-      if (result.received > 0 || result.failed > 0) {
-        app.log.info(result, "ifood order polling completed");
-      }
-    } catch (error) {
-      app.log.warn({ err: error }, "ifood order polling cycle failed");
-    } finally {
-      running = false;
-    }
-  };
+  const [, , connectionId, orderId] = sale.idempotencyKey.split(":");
+  if (!connectionId || !orderId) {
+    throw errors.conflict("IFOOD_ORDER_ID_MISSING", "Pedido iFood sem identificador externo.");
+  }
 
-  const timer = setInterval(() => void poll(), config.IFOOD_ORDER_POLLING_INTERVAL_MS ?? 30000);
-  timer.unref();
-  void poll();
-  return timer;
+  const connection = await prisma.integrationConnection.findFirst({
+    where: { id: connectionId, companyId: input.companyId, channel: "IFOOD" },
+    select: { id: true, accessToken: true, refreshToken: true, tokenExpiresAt: true }
+  });
+  if (!connection) {
+    throw errors.notFound("INTEGRATION_CONNECTION_NOT_FOUND", "Conexão iFood não encontrada.");
+  }
+
+  const token = await resolveIfoodAccessToken({
+    accessToken: connection.accessToken,
+    refreshToken: connection.refreshToken,
+    tokenExpiresAt: connection.tokenExpiresAt
+  });
+  if (token.refreshed) {
+    await prisma.integrationConnection.update({
+      where: { id: connection.id },
+      data: {
+        accessToken: token.refreshed.accessToken,
+        ...(token.refreshed.refreshToken ? { refreshToken: token.refreshed.refreshToken } : {}),
+        tokenExpiresAt: token.refreshed.tokenExpiresAt
+      }
+    });
+  }
+
+  return { sale, connection, orderId, accessToken: token.accessToken };
 }
 
 export async function growthRoutes(app: FastifyInstance) {
-  let ifoodOrderPollingTimer: NodeJS.Timeout | null = null;
+  app.post(
+    "/internal/jobs/ifood/orders/poll",
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+          groupId: "internal-ifood-orders-poll"
+        }
+      }
+    },
+    async (request) => {
+      const secret = request.headers["x-internal-job-secret"]?.toString();
+      if (!config.INTERNAL_JOB_SECRET || secret !== config.INTERNAL_JOB_SECRET) {
+        throw errors.forbidden();
+      }
 
-  app.addHook("onReady", async () => {
-    ifoodOrderPollingTimer = startIfoodOrderPolling(app);
-  });
-
-  app.addHook("onClose", async () => {
-    if (ifoodOrderPollingTimer) {
-      clearInterval(ifoodOrderPollingTimer);
+      return pollConnectedIfoodOrdersOnce({ logger: app.log });
     }
-  });
+  );
 
   app.get("/api/v1/alerts", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "inventory.read");
@@ -1917,7 +1990,19 @@ export async function growthRoutes(app: FastifyInstance) {
     return paginated(items, query.limit);
   });
 
-  app.post("/api/v1/imports/jobs", { preHandler: [app.authenticateUser] }, async (request, reply) => {
+  app.post(
+    "/api/v1/imports/jobs",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: "1 minute",
+          groupId: "imports-jobs-create"
+        }
+      }
+    },
+    async (request, reply) => {
     assertPermission(request.tenant!, "product.create");
     const body = parseBody(createImportJobBodySchema, request);
     await assertBranch(request.tenant!.companyId, body.branchId);
@@ -2455,10 +2540,23 @@ export async function growthRoutes(app: FastifyInstance) {
       after: { product: created.product, mapping: created.mapping, ifoodItem: payload }
     });
 
-    return reply.status(201).send(created);
-  });
+      return reply.status(201).send(created);
+    }
+  );
 
-  app.post("/api/v1/integrations/connections/:id/ifood/catalog/sync", { preHandler: [app.authenticateUser] }, async (request) => {
+  app.post(
+    "/api/v1/integrations/connections/:id/ifood/catalog/sync",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 6,
+          timeWindow: "1 minute",
+          groupId: "ifood-catalog-sync"
+        }
+      }
+    },
+    async (request) => {
     assertPermission(request.tenant!, "integration.manage");
     const params = parseParams(idParamsSchema, request);
     const body = parseBody(syncIfoodCatalogBodySchema, request);
@@ -2751,11 +2849,12 @@ export async function growthRoutes(app: FastifyInstance) {
       after: summary
     });
 
-    return {
-      summary,
-      items: result
-    };
-  });
+      return {
+        summary,
+        items: result
+      };
+    }
+  );
 
   app.get("/api/v1/integrations/connections/:id/ifood/events", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "integration.read");
@@ -2795,7 +2894,19 @@ export async function growthRoutes(app: FastifyInstance) {
     return paginated(items, query.limit);
   });
 
-  app.post("/api/v1/integrations/connections/:id/ifood/events", { preHandler: [app.authenticateUser] }, async (request) => {
+  app.post(
+    "/api/v1/integrations/connections/:id/ifood/events",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+          groupId: "ifood-events-ingest"
+        }
+      }
+    },
+    async (request) => {
     assertPermission(request.tenant!, "integration.manage");
     const params = parseParams(idParamsSchema, request);
     const body = parseBody(ingestIfoodOrderEventsBodySchema, request);
@@ -2832,10 +2943,23 @@ export async function growthRoutes(app: FastifyInstance) {
       after: summary
     });
 
-    return summary;
-  });
+      return summary;
+    }
+  );
 
-  app.post("/api/v1/integrations/connections/:id/ifood/events/poll", { preHandler: [app.authenticateUser] }, async (request) => {
+  app.post(
+    "/api/v1/integrations/connections/:id/ifood/events/poll",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 12,
+          timeWindow: "1 minute",
+          groupId: "ifood-events-poll"
+        }
+      }
+    },
+    async (request) => {
     assertPermission(request.tenant!, "integration.manage");
     const params = parseParams(idParamsSchema, request);
     const connection = await prisma.integrationConnection.findFirst({
@@ -2865,8 +2989,9 @@ export async function growthRoutes(app: FastifyInstance) {
       after: summary
     });
 
-    return summary;
-  });
+      return summary;
+    }
+  );
 
   app.get("/api/v1/integrations/connections/:id/ifood/pending-items", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "integration.read");
@@ -3004,7 +3129,8 @@ export async function growthRoutes(app: FastifyInstance) {
         branchId: request.tenant!.branchId,
         pendingItemId: params.pendingItemId,
         productId: body.productId,
-        userId: request.tenant!.userId
+        userId: request.tenant!.userId,
+        saveCatalogMapping: body.saveCatalogMapping
       })
     );
     await audit(request, {
@@ -3016,57 +3142,93 @@ export async function growthRoutes(app: FastifyInstance) {
     return result;
   });
 
-  app.post("/api/v1/sales/:id/ifood/action", { preHandler: [app.authenticateUser] }, async (request) => {
+  app.get(
+    "/api/v1/sales/:id/ifood/cancellation-reasons",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: "1 minute",
+          groupId: "ifood-cancellation-reasons"
+        }
+      }
+    },
+    async (request) => {
+    assertPermission(request.tenant!, "integration.manage");
+    const params = parseParams(idParamsSchema, request);
+    const context = await resolveIfoodSaleActionContext({
+      saleId: params.id,
+      companyId: request.tenant!.companyId,
+      branchId: request.tenant!.branchId
+    });
+    const reasons = await listIfoodCancellationReasons({ accessToken: context.accessToken, orderId: context.orderId });
+      return { orderId: context.orderId, reasons };
+    }
+  );
+
+  app.post(
+    "/api/v1/sales/:id/ifood/action",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+          groupId: "ifood-order-action"
+        }
+      }
+    },
+    async (request) => {
     assertPermission(request.tenant!, "integration.manage");
     const params = parseParams(idParamsSchema, request);
     const body = parseBody(ifoodOrderActionBodySchema, request);
-    const sale = await prisma.sale.findFirst({
-      where: { id: params.id, companyId: request.tenant!.companyId, branchId: request.tenant!.branchId, source: "IFOOD" },
-      select: { id: true, status: true, idempotencyKey: true }
+    const context = await resolveIfoodSaleActionContext({
+      saleId: params.id,
+      companyId: request.tenant!.companyId,
+      branchId: request.tenant!.branchId
     });
-    if (!sale) {
-      throw errors.notFound("IFOOD_SALE_NOT_FOUND", "Pedido iFood não encontrado.");
-    }
-    if (sale.status === "CANCELLED" || sale.status === "COMPLETED") {
-      throw errors.conflict("IFOOD_SALE_CLOSED", "Pedido iFood já está encerrado.");
-    }
-    const [, , connectionId, orderId] = sale.idempotencyKey.split(":");
-    if (!connectionId || !orderId) {
-      throw errors.conflict("IFOOD_ORDER_ID_MISSING", "Pedido iFood sem identificador externo.");
-    }
-    const connection = await prisma.integrationConnection.findFirst({
-      where: { id: connectionId, companyId: request.tenant!.companyId, channel: "IFOOD" },
-      select: { id: true, accessToken: true, refreshToken: true, tokenExpiresAt: true }
-    });
-    if (!connection) {
-      throw errors.notFound("INTEGRATION_CONNECTION_NOT_FOUND", "Conexão iFood não encontrada.");
-    }
-    const token = await resolveIfoodAccessToken({
-      accessToken: connection.accessToken,
-      refreshToken: connection.refreshToken,
-      tokenExpiresAt: connection.tokenExpiresAt
-    });
-    if (token.refreshed) {
-      await prisma.integrationConnection.update({
-        where: { id: connection.id },
-        data: {
-          accessToken: token.refreshed.accessToken,
-          ...(token.refreshed.refreshToken ? { refreshToken: token.refreshed.refreshToken } : {}),
-          tokenExpiresAt: token.refreshed.tokenExpiresAt
-        }
+
+    if (body.action === "REQUEST_CANCELLATION") {
+      const reasons = await listIfoodCancellationReasons({ accessToken: context.accessToken, orderId: context.orderId });
+      if (!reasons.some((reason) => reason.code === body.reasonCode)) {
+        throw errors.conflict("IFOOD_CANCELLATION_REASON_INVALID", "Motivo de cancelamento inválido para este pedido iFood.");
+      }
+
+      const result = await requestIfoodCancellation({ accessToken: context.accessToken, orderId: context.orderId, reasonCode: body.reasonCode });
+      await audit(request, {
+        action: "integration_connection.ifood_order_cancellation_request",
+        entityType: "Sale",
+        entityId: context.sale.id,
+        after: { action: body.action, orderId: context.orderId, reasonCode: body.reasonCode }
       });
+      return { action: body.action, orderId: context.orderId, reasonCode: body.reasonCode, result };
     }
-    const result = await transitionIfoodOrder({ accessToken: token.accessToken, orderId, action: body.action });
+
+    const result = await transitionIfoodOrder({ accessToken: context.accessToken, orderId: context.orderId, action: body.action });
     await audit(request, {
       action: "integration_connection.ifood_order_action",
       entityType: "Sale",
-      entityId: sale.id,
-      after: { action: body.action, orderId }
+      entityId: context.sale.id,
+      after: { action: body.action, orderId: context.orderId }
     });
-    return { action: body.action, orderId, result };
-  });
+      return { action: body.action, orderId: context.orderId, result };
+    }
+  );
 
-  app.post("/api/v1/integrations/connections/:id/ifood/events/reprocess", { preHandler: [app.authenticateUser] }, async (request) => {
+  app.post(
+    "/api/v1/integrations/connections/:id/ifood/events/reprocess",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 12,
+          timeWindow: "1 minute",
+          groupId: "ifood-events-reprocess"
+        }
+      }
+    },
+    async (request) => {
     assertPermission(request.tenant!, "integration.manage");
     const params = parseParams(idParamsSchema, request);
     const body = parseBody(reprocessIfoodOrderEventsBodySchema, request);
@@ -3114,8 +3276,9 @@ export async function growthRoutes(app: FastifyInstance) {
         throw errors.conflict("IFOOD_REPROCESS_FAILED", "Não foi possível reprocessar os eventos pendentes do iFood.");
       }
       return JSON.parse(response.body);
-    });
-  });
+      });
+    }
+  );
 
   app.get("/api/v1/reports/jobs", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "sale.read");
@@ -3132,7 +3295,19 @@ export async function growthRoutes(app: FastifyInstance) {
     return paginated(items, query.limit);
   });
 
-  app.post("/api/v1/reports/jobs", { preHandler: [app.authenticateUser] }, async (request, reply) => {
+  app.post(
+    "/api/v1/reports/jobs",
+    {
+      preHandler: [app.authenticateUser],
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+          groupId: "reports-jobs-create"
+        }
+      }
+    },
+    async (request, reply) => {
     assertPermission(request.tenant!, "sale.read");
     const body = parseBody(createReportJobBodySchema, request);
     await assertBranch(request.tenant!.companyId, body.branchId);
@@ -3149,8 +3324,9 @@ export async function growthRoutes(app: FastifyInstance) {
     });
 
     await audit(request, { action: "report_job.create", entityType: "ReportJob", entityId: job.id, after: job });
-    return reply.status(201).send(job);
-  });
+      return reply.status(201).send(job);
+    }
+  );
 
   app.get("/api/v1/search", { preHandler: [app.authenticateUser] }, async (request) => {
     assertPermission(request.tenant!, "company.read");

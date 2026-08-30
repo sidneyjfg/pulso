@@ -50,7 +50,8 @@ export async function authRoutes(app: FastifyInstance) {
       config: {
         rateLimit: {
           max: 5,
-          timeWindow: "15 minutes"
+          timeWindow: "15 minutes",
+          groupId: "auth-register"
         }
       }
     },
@@ -68,8 +69,9 @@ export async function authRoutes(app: FastifyInstance) {
     {
       config: {
         rateLimit: {
-          max: 10,
-          timeWindow: "15 minutes"
+          max: config.LOGIN_RATE_LIMIT_MAX,
+          timeWindow: config.LOGIN_RATE_LIMIT_WINDOW,
+          groupId: "auth-login"
         }
       }
     },
@@ -87,8 +89,9 @@ export async function authRoutes(app: FastifyInstance) {
     {
       config: {
         rateLimit: {
-          max: 10,
-          timeWindow: "15 minutes"
+          max: config.LOGIN_RATE_LIMIT_MAX,
+          timeWindow: config.LOGIN_RATE_LIMIT_WINDOW,
+          groupId: "admin-login"
         }
       }
     },
@@ -99,7 +102,18 @@ export async function authRoutes(app: FastifyInstance) {
     }
   );
 
-  app.post("/api/v1/auth/refresh", async (request, reply) => {
+  app.post(
+    "/api/v1/auth/refresh",
+    {
+      config: {
+        rateLimit: {
+          max: config.LOGIN_RATE_LIMIT_MAX,
+          timeWindow: config.LOGIN_RATE_LIMIT_WINDOW,
+          groupId: "auth-refresh"
+        }
+      }
+    },
+    async (request, reply) => {
     sendNoStore(reply);
     const refreshToken = request.cookies[refreshCookieName];
     if (!refreshToken) {
@@ -110,7 +124,8 @@ export async function authRoutes(app: FastifyInstance) {
     const result = await authService.refresh(refreshToken);
     setRefreshCookie(reply, result.refreshToken);
     return authResponse(result);
-  });
+    }
+  );
 
   app.post("/api/v1/auth/context", { preHandler: [app.authenticateUser] }, async (request, reply) => {
     sendNoStore(reply);

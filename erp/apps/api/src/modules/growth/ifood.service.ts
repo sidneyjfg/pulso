@@ -73,6 +73,11 @@ export type IfoodOrderDetails = {
   [key: string]: unknown;
 };
 
+export type IfoodCancellationReason = {
+  code: string;
+  description: string;
+};
+
 type StoredIfoodCredentials = {
   accessToken: string | null;
   refreshToken: string | null;
@@ -612,6 +617,54 @@ export async function transitionIfoodOrder(input: { accessToken: string; orderId
   const payload = await parseJsonSafe(response);
   if (!response.ok && response.status !== 409) {
     throw new AppError("IFOOD_ORDER_TRANSITION_FAILED", ifoodErrorMessage(payload, "Não foi possível atualizar status do pedido no iFood."), response.status === 401 || response.status === 403 ? 409 : 502);
+  }
+
+  return payload;
+}
+
+export async function listIfoodCancellationReasons(input: { accessToken: string; orderId: string }) {
+  const cfg = ifoodConfigOrThrow();
+  const response = await fetch(`${cfg.baseUrl}/order/v1.0/orders/${input.orderId}/cancellationReasons`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${input.accessToken}`,
+      "Content-Type": "application/json"
+    }
+  });
+
+  const payload = (await parseJsonSafe(response)) as { reasons?: unknown } | IfoodCancellationReason[] | null;
+  if (response.status === 204) {
+    return [] satisfies IfoodCancellationReason[];
+  }
+  if (!response.ok) {
+    throw new AppError("IFOOD_CANCELLATION_REASONS_FAILED", ifoodErrorMessage(payload, "Não foi possível listar motivos de cancelamento no iFood."), response.status === 401 || response.status === 403 ? 409 : 502);
+  }
+
+  const reasons = Array.isArray(payload) ? payload : Array.isArray(payload?.reasons) ? payload.reasons : [];
+  return reasons
+    .filter((reason): reason is Record<string, unknown> => Boolean(reason) && typeof reason === "object")
+    .map((reason) => ({
+      code: String(reason.code ?? ""),
+      description: String(reason.description ?? reason.code ?? "")
+    }))
+    .filter((reason) => reason.code.length > 0);
+}
+
+export async function requestIfoodCancellation(input: { accessToken: string; orderId: string; reasonCode: string }) {
+  const cfg = ifoodConfigOrThrow();
+  const response = await fetch(`${cfg.baseUrl}/order/v1.0/orders/${input.orderId}/requestCancellation`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${input.accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ reason: input.reasonCode })
+  });
+
+  const payload = await parseJsonSafe(response);
+  if (!response.ok) {
+    throw new AppError("IFOOD_CANCELLATION_REQUEST_FAILED", ifoodErrorMessage(payload, "Não foi possível solicitar cancelamento no iFood."), response.status === 401 || response.status === 403 ? 409 : 502);
   }
 
   return payload;

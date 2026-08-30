@@ -1,0 +1,72 @@
+services:
+  proxy:
+    environment:
+      APP_DOMAIN: ":80"
+
+  api:
+    image: pulso-erp-api:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: production
+      APP_ENV: docker-local-scale
+      WEB_URL: http://localhost:8080
+      API_URL: http://localhost:8080
+      DATABASE_URL: mysql://root:@host.docker.internal:3306/erp?connection_limit=10&pool_timeout=10
+      TRUST_PROXY: "true"
+      CORS_ORIGINS: http://localhost:8080
+      COOKIE_DOMAIN: localhost
+      COOKIE_SECURE: "true"
+      COOKIE_SAME_SITE: lax
+      RATE_LIMIT_MAX: "10000"
+      RATE_LIMIT_STORE: redis
+      DEV_SEED: "false"
+      INTERNAL_JOB_SECRET: local_scale_internal_job_secret_0123456789abcdef
+      JWT_USER_SECRET: local_scale_user_secret_0123456789abcdef012345
+      JWT_ADMIN_SECRET: local_scale_admin_secret_0123456789abcdef01234
+      DATA_ENCRYPTION_KEY: local_scale_encryption_key_0123456789abcdef
+      IFOOD_ENABLED: "false"
+      IFOOD_ORDER_POLLING_ENABLED: "false"
+      FOOD99_ENABLED: "false"
+
+  worker:
+    image: pulso-erp-worker:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: production
+      APP_ENV: docker-local-scale
+      WEB_URL: http://localhost:8080
+      API_URL: http://api:3333
+      DATABASE_URL: mysql://root:@host.docker.internal:3306/erp?connection_limit=5&pool_timeout=10
+      TRUST_PROXY: "true"
+      CORS_ORIGINS: http://localhost:8080
+      COOKIE_DOMAIN: localhost
+      COOKIE_SECURE: "true"
+      COOKIE_SAME_SITE: lax
+      RATE_LIMIT_STORE: redis
+      DEV_SEED: "false"
+      INTERNAL_JOB_SECRET: local_scale_internal_job_secret_0123456789abcdef
+      JWT_USER_SECRET: local_scale_user_secret_0123456789abcdef012345
+      JWT_ADMIN_SECRET: local_scale_admin_secret_0123456789abcdef01234
+      DATA_ENCRYPTION_KEY: local_scale_encryption_key_0123456789abcdef
+      IFOOD_ENABLED: "false"
+      IFOOD_ORDER_POLLING_ENABLED: "false"
+      FOOD99_ENABLED: "false"
+
+  web:
+    image: pulso-erp-web:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_URL: http://localhost:8080

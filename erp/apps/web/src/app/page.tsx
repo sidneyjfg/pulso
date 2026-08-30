@@ -79,6 +79,7 @@ import {
   getIfoodOrders,
   getIfoodPendingItems,
   getIfoodSaleExternalDetails,
+  getIfoodCancellationReasons,
   getIfoodIntegrationHealth,
   getCustomers,
   getMe,
@@ -118,6 +119,7 @@ import {
   type GenericListItem,
   type GenericListResponse,
   type IfoodOauthStartResponse,
+  type IfoodOrderActionBody,
   type LoginBody,
   type LoginResponse,
   type MeResponse,
@@ -1107,6 +1109,12 @@ type IfoodStockSettingsDialogState = {
   connection: GenericListItem;
 };
 
+type IfoodCancellationDialogState = {
+  saleId: string;
+  title: string;
+  reasons: Array<{ code: string; description: string }>;
+};
+
 type IfoodCatalogLinkDialogState = {
   item: GenericListItem;
   source: "catalog" | "pending";
@@ -1689,6 +1697,63 @@ function IfoodStockSettingsDialog({
   );
 }
 
+function IfoodCancellationDialog({
+  state,
+  isSaving,
+  onClose,
+  onConfirm
+}: {
+  state: IfoodCancellationDialogState | null;
+  isSaving: boolean;
+  onClose: () => void;
+  onConfirm: (reasonCode: string) => void;
+}) {
+  const [reasonCode, setReasonCode] = useState("");
+
+  useEffect(() => {
+    setReasonCode(state?.reasons[0]?.code ?? "");
+  }, [state]);
+
+  if (!state) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/55 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="ifood-cancel-title">
+      <section className="auth-card-enter w-full max-w-md rounded-xl border border-white/20 bg-white p-5 text-slate-950 shadow-2xl shadow-slate-950/30">
+        <div className="flex gap-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-red-200 bg-red-50 text-red-600">
+            <AlertTriangle aria-hidden="true" size={18} />
+          </div>
+          <div className="min-w-0">
+            <h2 id="ifood-cancel-title" className="text-lg font-semibold tracking-normal">Solicitar cancelamento no iFood?</h2>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">{state.title} será enviado ao iFood para análise. O pedido só será cancelado no ERP quando o iFood retornar o evento de cancelamento.</p>
+          </div>
+        </div>
+
+        <label className="mt-5 grid gap-1 text-sm font-medium text-slate-950">
+          Motivo aceito pelo iFood
+          <select value={reasonCode} onChange={(event) => setReasonCode(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-red-500">
+            {state.reasons.map((reason) => (
+              <option key={reason.code} value={reason.code}>{reason.code} - {reason.description}</option>
+            ))}
+          </select>
+        </label>
+
+        <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onClose} className="inline-flex items-center justify-center rounded-md border border-border bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,border-color,background-color] duration-150 ease-[var(--ease-out)] hover:border-slate-300 hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+            Fechar
+          </button>
+          <button type="button" disabled={isSaving || !reasonCode} onClick={() => onConfirm(reasonCode)} className="inline-flex items-center justify-center gap-2 rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] duration-150 ease-[var(--ease-out)] hover:bg-red-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">
+            {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <X aria-hidden="true" size={16} />}
+            Solicitar cancelamento
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function IfoodCatalogLinkDialog({
   state,
   products,
@@ -1703,17 +1768,19 @@ function IfoodCatalogLinkDialog({
   categories: CategoryListResponse["data"];
   isSaving: boolean;
   onClose: () => void;
-  onLink: (productId: string) => void;
+  onLink: (productId: string, saveCatalogMapping?: boolean) => void;
   onCreate: (categoryId?: string) => void;
 }) {
   const [productId, setProductId] = useState("");
   const [categoryId, setCategoryId] = useState("");
+  const [saveCatalogMapping, setSaveCatalogMapping] = useState(true);
   const item = state?.item;
   const isPendingResolution = state?.source === "pending";
 
   useEffect(() => {
     setProductId("");
     setCategoryId("");
+    setSaveCatalogMapping(true);
   }, [item]);
 
   if (!item) {
@@ -1759,7 +1826,21 @@ function IfoodCatalogLinkDialog({
                 ))}
               </select>
             </label>
-            <button type="button" disabled={isSaving || !productId} onClick={() => onLink(productId)} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-slate-800 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500">
+            {isPendingResolution ? (
+              <label className="mt-3 flex items-start gap-2 rounded-md border border-border bg-slate-50 p-3 text-sm text-slate-950">
+                <input
+                  type="checkbox"
+                  checked={saveCatalogMapping}
+                  onChange={(event) => setSaveCatalogMapping(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>
+                  <span className="block font-medium">Salvar vínculo para próximos pedidos</span>
+                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">Novos pedidos com este mesmo item iFood usarão automaticamente o produto ERP selecionado.</span>
+                </span>
+              </label>
+            ) : null}
+            <button type="button" disabled={isSaving || !productId} onClick={() => onLink(productId, isPendingResolution ? saveCatalogMapping : undefined)} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-slate-800 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500">
               {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Plug aria-hidden="true" size={16} />}
               Vincular
             </button>
@@ -4138,6 +4219,7 @@ function OperationalModuleSection({
   onPrimaryAction,
   onViewDetails,
   onIfoodOrderAction,
+  onIfoodOrderCancel,
   onSaleCancel,
   onPurchaseReceive,
   onPurchaseCancel,
@@ -4172,6 +4254,7 @@ function OperationalModuleSection({
   onPrimaryAction: (item?: GenericListItem) => void;
   onViewDetails: (item: GenericListItem) => void;
   onIfoodOrderAction?: (saleId: string, action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH") => void;
+  onIfoodOrderCancel?: (item: GenericListItem) => void;
   onSaleCancel?: (item: GenericListItem) => void;
   onPurchaseReceive?: (item: GenericListItem) => void;
   onPurchaseCancel?: (item: GenericListItem) => void;
@@ -4630,6 +4713,11 @@ function OperationalModuleSection({
                         <button type="button" disabled={isActionPending} onClick={() => onIfoodOrderAction(textValue(item.id, ""), "DISPATCH")} className="rounded-md border border-border bg-white px-2.5 py-2 text-xs font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                           Despachar
                         </button>
+                        {itemStatus !== "CANCELLED" && itemStatus !== "COMPLETED" && onIfoodOrderCancel ? (
+                          <button type="button" disabled={isActionPending} onClick={() => onIfoodOrderCancel(item)} className="rounded-md border border-red-200 bg-white px-2.5 py-2 text-xs font-medium text-red-700 transition-[transform,background-color] hover:bg-red-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">
+                            Cancelar iFood
+                          </button>
+                        ) : null}
                       </>
                     ) : null}
                     <button
@@ -5562,6 +5650,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [detailsDialog, setDetailsDialog] = useState<DetailsDialogState | null>(null);
   const [ifoodOauthDialog, setIfoodOauthDialog] = useState<IfoodOauthDialogState | null>(null);
   const [ifoodStockSettingsDialog, setIfoodStockSettingsDialog] = useState<IfoodStockSettingsDialogState | null>(null);
+  const [ifoodCancellationDialog, setIfoodCancellationDialog] = useState<IfoodCancellationDialogState | null>(null);
   const [ifoodCatalogLinkDialog, setIfoodCatalogLinkDialog] = useState<IfoodCatalogLinkDialogState | null>(null);
   const [purchaseDialog, setPurchaseDialog] = useState<PurchaseCreateDialogState | null>(null);
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>(defaultPricingConfig);
@@ -6208,7 +6297,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     }
   });
   const ifoodCatalogItemMutation = useMutation({
-    mutationFn: async ({ item, source, mode, productId, categoryId }: { item: GenericListItem; source: "catalog" | "pending"; mode: "link" | "create"; productId?: string; categoryId?: string }) => {
+    mutationFn: async ({ item, source, mode, productId, categoryId, saveCatalogMapping }: { item: GenericListItem; source: "catalog" | "pending"; mode: "link" | "create"; productId?: string; categoryId?: string; saveCatalogMapping?: boolean }) => {
       const connections = await getPaginatedResource(accessToken, "/api/v1/integrations/connections", { limit: 10 });
       const connection = connections.data.find((candidate) => textValue(asRecord(candidate)?.channel, "") === "IFOOD" && textValue(asRecord(candidate)?.status, "") === "CONNECTED");
       const connectionId = textValue(asRecord(connection)?.id, "");
@@ -6224,7 +6313,10 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           throw new Error("Selecione um produto do ERP para vincular.");
         }
         if (source === "pending") {
-          return resolveIfoodPendingItem(accessToken, connectionId, textValue(item.id, ""), { productId });
+          return resolveIfoodPendingItem(accessToken, connectionId, textValue(item.id, ""), {
+            productId,
+            ...(saveCatalogMapping !== undefined ? { saveCatalogMapping } : {})
+          });
         }
         return linkIfoodCatalogItem(accessToken, connectionId, ifoodItemId, { productId });
       }
@@ -6241,20 +6333,23 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         ...(textValue(item.ean, "") ? { barcode: textValue(item.ean, "") } : {})
       });
     },
-    onSuccess: async () => {
+    onSuccess: async (_result, variables) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] }),
         queryClient.invalidateQueries({ queryKey: ["products", accessToken] }),
         queryClient.invalidateQueries({ queryKey: ["ifood-link-products", accessToken] })
       ]);
       const source = ifoodCatalogLinkDialog?.source;
+      const mappingSaved = source === "pending" && variables.saveCatalogMapping !== false;
       setIfoodCatalogLinkDialog(null);
       setAlert({
         tone: "success",
         title: source === "pending" ? "Pendência resolvida." : "Item iFood vinculado.",
         description:
           source === "pending"
-            ? "O produto foi vinculado e o estoque foi reservado ou baixado conforme o estado atual do pedido."
+            ? mappingSaved
+              ? "O produto foi vinculado, o mapeamento foi salvo e o estoque foi reservado ou baixado conforme o estado atual do pedido."
+              : "O produto foi vinculado nesta venda e o estoque foi reservado ou baixado conforme o estado atual do pedido."
             : "Os próximos pedidos poderão usar esse vínculo para reservar estoque."
       });
     },
@@ -6267,14 +6362,18 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     }
   });
   const ifoodOrderStatusMutation = useMutation({
-    mutationFn: ({ saleId, action }: { saleId: string; action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH" }) =>
-      runIfoodOrderAction(accessToken, saleId, { action }),
-    onSuccess: async () => {
+    mutationFn: ({ saleId, body }: { saleId: string; body: IfoodOrderActionBody }) =>
+      runIfoodOrderAction(accessToken, saleId, body),
+    onSuccess: async (_result, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["operational-module", accessToken] });
+      setIfoodCancellationDialog(null);
+      const cancellation = variables.body.action === "REQUEST_CANCELLATION";
       setAlert({
         tone: "success",
-        title: "Etapa enviada ao iFood.",
-        description: "O status será atualizado assim que o iFood confirmar esta etapa."
+        title: cancellation ? "Cancelamento solicitado ao iFood." : "Etapa enviada ao iFood.",
+        description: cancellation
+          ? "O pedido será cancelado no ERP quando o iFood confirmar pelo próximo evento de polling."
+          : "O status será atualizado assim que o iFood confirmar esta etapa."
       });
     },
     onError: (error) => {
@@ -6919,6 +7018,36 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
     }
 
     pricingSettingsMutation.mutate(pricingConfig);
+  }
+
+  async function openIfoodCancellationDialog(item: GenericListItem) {
+    const saleId = textValue(item.id, "");
+    if (!saleId) {
+      return;
+    }
+
+    try {
+      const result = await getIfoodCancellationReasons(accessToken, saleId);
+      if (result.reasons.length === 0) {
+        setAlert({
+          tone: "warning",
+          title: "Cancelamento indisponível no iFood.",
+          description: "O iFood não retornou motivos válidos para cancelar este pedido neste momento."
+        });
+        return;
+      }
+      setIfoodCancellationDialog({
+        saleId,
+        title: itemSummary("ifood-orders", item).title,
+        reasons: result.reasons
+      });
+    } catch (error) {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível carregar motivos do iFood.",
+        description: error instanceof Error ? error.message : "Tente novamente ou verifique o pedido no portal iFood."
+      });
+    }
   }
 
   function confirmSettingToggle(key: keyof SettingsState, checked: boolean, title: string, description: string) {
@@ -7822,7 +7951,8 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onNext={goToNextOperationalPage}
             onPrimaryAction={(item) => runOperationalPrimaryAction(tab, item)}
             onViewDetails={(item) => void openOperationalDetails(item)}
-            onIfoodOrderAction={(saleId, action) => ifoodOrderStatusMutation.mutate({ saleId, action })}
+            onIfoodOrderAction={(saleId, action) => ifoodOrderStatusMutation.mutate({ saleId, body: { action } })}
+            onIfoodOrderCancel={(item) => void openIfoodCancellationDialog(item)}
             onSaleCancel={(item) => {
               const saleId = textValue(item.id, "");
               setConfirmAction({
@@ -7917,17 +8047,37 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           ifoodStockSettingsMutation.mutate({ connectionId, input });
         }}
       />
+      <IfoodCancellationDialog
+        state={ifoodCancellationDialog}
+        isSaving={ifoodOrderStatusMutation.isPending}
+        onClose={() => setIfoodCancellationDialog(null)}
+        onConfirm={(reasonCode) => {
+          if (!ifoodCancellationDialog) {
+            return;
+          }
+          ifoodOrderStatusMutation.mutate({
+            saleId: ifoodCancellationDialog.saleId,
+            body: { action: "REQUEST_CANCELLATION", reasonCode }
+          });
+        }}
+      />
       <IfoodCatalogLinkDialog
         state={ifoodCatalogLinkDialog}
         products={activeIfoodLinkProducts}
         categories={productCategoriesQuery.data?.data ?? []}
         isSaving={ifoodCatalogItemMutation.isPending}
         onClose={() => setIfoodCatalogLinkDialog(null)}
-        onLink={(productId) => {
+        onLink={(productId, saveCatalogMapping) => {
           if (!ifoodCatalogLinkDialog) {
             return;
           }
-          ifoodCatalogItemMutation.mutate({ item: ifoodCatalogLinkDialog.item, source: ifoodCatalogLinkDialog.source, mode: "link", productId });
+          ifoodCatalogItemMutation.mutate({
+            item: ifoodCatalogLinkDialog.item,
+            source: ifoodCatalogLinkDialog.source,
+            mode: "link",
+            productId,
+            ...(saveCatalogMapping !== undefined ? { saveCatalogMapping } : {})
+          });
         }}
         onCreate={(categoryId) => {
           if (!ifoodCatalogLinkDialog) {

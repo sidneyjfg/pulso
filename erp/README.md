@@ -178,12 +178,12 @@ corepack pnpm dev:infra:down
 
 ## Docker de producao
 
-O `docker-compose.yml` esta estruturado para rodar a aplicacao por imagens publicadas no GHCR e deixa o modo de build interno comentado em cada servico.
+Use `docker-compose.prod.yml` para rodar a aplicacao por imagens publicadas no GHCR. O arquivo deixa o modo de build interno comentado em cada servico. O `docker-compose.yml` principal permanece focado em infraestrutura local.
 
 Modo imagem:
 
 ```bash
-ERP_VERSION=0.1.0 docker compose up -d
+APP_DOMAIN=app.seudominio.com ERP_VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d
 ```
 
 Variaveis para trocar os nomes das imagens:
@@ -198,13 +198,13 @@ Modo build interno:
 
 1. Comente `image:` no servico desejado.
 2. Descomente o bloco `build:` correspondente.
-3. Rode `docker compose up -d --build`.
+3. Rode `docker compose -f docker-compose.prod.yml up -d --build`.
 
-Em producao, use `NODE_ENV=production`, `COOKIE_SECURE=true`, segredos reais para JWT/encryptacao, `DATABASE_URL` apontando para MySQL gerenciado ou externo e tags de imagem imutaveis. O servico `web` nao recebe `.env` completo para evitar exposicao desnecessaria de segredos no container frontend.
+Em producao, use `NODE_ENV=production`, `COOKIE_SECURE=true`, segredos reais para JWT/encryptacao, `DATABASE_URL` apontando para MySQL gerenciado ou externo e tags de imagem imutaveis. O servico `web` nao recebe `.env` completo para evitar exposicao desnecessaria de segredos no container frontend. O guia completo esta em `docs/production-operations.md`.
 
 ## Atualizacoes sem parada
 
-Para reduzir impacto em cliente, publique imagens versionadas, aplique migrations compativeis com a versao anterior, suba a nova imagem e espere `/health` e `/ready` ficarem saudaveis antes de trocar trafego. Para zero downtime real, rode pelo menos duas instancias atras de proxy/load balancer; com Compose simples, a troca com `docker compose pull && docker compose up -d --no-deps api worker web` reduz a janela, mas ainda pode reiniciar containers individualmente.
+Para reduzir impacto em cliente, publique imagens versionadas, aplique migrations compativeis com a versao anterior, suba a nova imagem e espere `/health` e `/ready` ficarem saudaveis antes de trocar trafego. Para zero downtime real, rode pelo menos duas instancias atras de proxy/load balancer; com Compose simples, a troca com `docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --no-deps api worker web` reduz a janela, mas ainda pode reiniciar containers individualmente.
 
 ## Scripts principais
 
@@ -218,6 +218,8 @@ corepack pnpm lint
 corepack pnpm typecheck
 corepack pnpm test
 corepack pnpm test:security
+corepack pnpm check:production
+corepack pnpm check:production:smoke
 ```
 
 ## Login e registro

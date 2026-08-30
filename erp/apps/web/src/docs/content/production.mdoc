@@ -1,0 +1,45 @@
+# Producao
+
+Use `docker-compose.prod.yml` para producao. Apenas o proxy publica portas; API, worker e Redis ficam na rede interna.
+
+## Entrada publica
+
+```text
+cliente -> Caddy -> web
+                -> api
+```
+
+O proxy encaminha `/api/*`, `/health` e `/ready` para a API. O restante vai para o web.
+
+## Variaveis criticas
+
+- `NODE_ENV=production`
+- `COOKIE_SECURE=true`
+- `TRUST_PROXY=true`
+- `RATE_LIMIT_STORE=redis`
+- `INTERNAL_JOB_SECRET` com segredo forte
+- `CORS_ORIGINS` com o dominio real
+- `DATABASE_URL` apontando para MySQL de producao
+
+## Escala
+
+A API pode ser escalada porque sessao fica em JWT/banco e o rate limit usa Redis. O polling recorrente do iFood fica no worker e usa lock Redis antes de chamar a API interna.
+
+## Deploy
+
+Publique imagens GHCR com tag imutavel, rode migration compativel e atualize os servicos.
+
+```bash
+ERP_VERSION=0.1.1 docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
+ERP_VERSION=0.1.1 docker compose -f docker-compose.prod.yml up -d --no-deps api worker web
+```
+
+## Rollback
+
+Rollback depende de migration compativel com a versao anterior.
+
+```bash
+ERP_VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d --no-deps api worker web
+```
+
+O guia operacional completo fica em `docs/production-operations.md`.

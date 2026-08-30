@@ -21,7 +21,13 @@
     "test:unit": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "playwright test",
-    "test:security": "vitest run --config vitest.security.config.ts"
+    "test:security": "vitest run --config vitest.security.config.ts",
+    "check:production": "node scripts/check-production.mjs",
+    "check:production:smoke": "node scripts/check-production.mjs --smoke",
+    "check:performance": "node scripts/check-performance.mjs",
+    "check:performance:load": "node scripts/check-performance.mjs --load",
+    "check:performance:explain": "node scripts/check-performance.mjs --pool --explain",
+    "check:performance:stock": "node scripts/check-stock-concurrency.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.2",

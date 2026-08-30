@@ -85,6 +85,13 @@ export const docPages: DocPage[] = [
     group: "Comece aqui"
   },
   {
+    slug: "production",
+    title: "Producao",
+    description: "Proxy, deploy, rollback, rate limit e operacao segura.",
+    file: "production.mdoc",
+    group: "Comece aqui"
+  },
+  {
     slug: "errors",
     title: "Erros",
     description: "Padrao de resposta, validacao e autorizacao.",

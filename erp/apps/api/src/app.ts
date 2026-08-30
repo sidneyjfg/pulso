@@ -7,6 +7,7 @@ import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import Fastify from "fastify";
+import { Redis } from "ioredis";
 import { config } from "@erp/config";
 import { authRoutes } from "./modules/auth/auth.routes.js";
 import { adminRoutes } from "./modules/admin/admin.routes.js";
@@ -25,9 +26,33 @@ import { registerTenantPlugin } from "./plugins/tenant.js";
 
 const corsOrigins = config.CORS_ORIGINS.split(",").map((origin) => origin.trim());
 
+function rateLimitOptions() {
+  if (config.RATE_LIMIT_STORE !== "redis") {
+    return { options: {}, close: async () => {} };
+  }
+
+  const redis = new Redis(config.REDIS_URL, {
+    connectTimeout: 500,
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false
+  });
+
+  return {
+    options: {
+      redis,
+      nameSpace: "pulso-rate-limit-",
+      skipOnError: false
+    },
+    close: async () => {
+      redis.disconnect();
+    }
+  };
+}
+
 export async function buildApp() {
   const app = Fastify({
     bodyLimit: 8 * 1024 * 1024,
+    trustProxy: config.TRUST_PROXY,
     logger: {
       level: config.LOG_LEVEL,
       redact: {
@@ -76,9 +101,14 @@ export async function buildApp() {
     credentials: true
   });
   await app.register(cookie);
+  const rateLimitStore = rateLimitOptions();
+  app.addHook("onClose", rateLimitStore.close);
+
   await app.register(rateLimit, {
     max: config.RATE_LIMIT_MAX,
-    timeWindow: config.RATE_LIMIT_WINDOW
+    timeWindow: config.RATE_LIMIT_WINDOW,
+    enableDraftSpec: true,
+    ...rateLimitStore.options
   });
   await app.register(swagger, {
     openapi: {

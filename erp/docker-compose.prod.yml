@@ -1,0 +1,113 @@
+services:
+  proxy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_healthy
+
+  api:
+    image: ${ERP_API_IMAGE:-ghcr.io/sua-org/pulso-erp-api:${ERP_VERSION:-0.1.0}}
+    # Para build interno, comente a linha image acima e descomente:
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile.api
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      REDIS_URL: redis://redis:6379
+      TRUST_PROXY: "true"
+      RATE_LIMIT_STORE: redis
+    expose:
+      - "3333"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3333/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  worker:
+    image: ${ERP_WORKER_IMAGE:-ghcr.io/sua-org/pulso-erp-worker:${ERP_VERSION:-0.1.0}}
+    # Para build interno, comente a linha image acima e descomente:
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile.worker
+    env_file:
+      - .env
+    environment:
+      API_URL: http://api:3333
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ${ERP_WEB_IMAGE:-ghcr.io/sua-org/pulso-erp-web:${ERP_VERSION:-0.1.0}}
+    # Para build interno, comente a linha image acima e descomente:
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile.web
+    environment:
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://${APP_DOMAIN:-localhost}}
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migrate:
+    image: ${ERP_API_IMAGE:-ghcr.io/sua-org/pulso-erp-api:${ERP_VERSION:-0.1.0}}
+    # Para build interno, comente a linha image acima e descomente:
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile.api
+    profiles:
+      - migrate
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    command: ["pnpm", "--filter", "@erp/database", "exec", "prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

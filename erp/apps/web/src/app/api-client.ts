@@ -665,7 +665,7 @@ export async function getIfoodPendingItems(accessToken: string, input: { limit?:
   return parseResponse<GenericListResponse>(response);
 }
 
-export async function resolveIfoodPendingItem(accessToken: string, connectionId: string, pendingItemId: string, body: { productId: string }) {
+export async function resolveIfoodPendingItem(accessToken: string, connectionId: string, pendingItemId: string, body: { productId: string; saveCatalogMapping?: boolean }) {
   const response = await fetch(`${API_URL}/api/v1/integrations/connections/${connectionId}/ifood/pending-items/${pendingItemId}/resolve`, {
     method: "POST",
     headers: {
@@ -677,7 +677,18 @@ export async function resolveIfoodPendingItem(accessToken: string, connectionId:
   return parseResponse<GenericListItem>(response);
 }
 
-export async function runIfoodOrderAction(accessToken: string, saleId: string, body: { action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH" }) {
+export type IfoodOrderActionBody =
+  | { action: "START_PREPARATION" | "READY_TO_PICKUP" | "DISPATCH" }
+  | { action: "REQUEST_CANCELLATION"; reasonCode: string };
+
+export async function getIfoodCancellationReasons(accessToken: string, saleId: string) {
+  const response = await fetch(`${API_URL}/api/v1/sales/${saleId}/ifood/cancellation-reasons`, {
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  return parseResponse<{ orderId: string; reasons: Array<{ code: string; description: string }> }>(response);
+}
+
+export async function runIfoodOrderAction(accessToken: string, saleId: string, body: IfoodOrderActionBody) {
   const response = await fetch(`${API_URL}/api/v1/sales/${saleId}/ifood/action`, {
     method: "POST",
     headers: {

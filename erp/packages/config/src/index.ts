@@ -72,6 +72,8 @@ const envSchema = z.object({
   API_HOST: z.string().min(1).default("localhost"),
   API_PORT: z.coerce.number().int().positive().default(3333),
   API_URL: z.string().url(),
+  TRUST_PROXY: booleanString.default("false"),
+  INTERNAL_JOB_SECRET: z.string().min(32).optional(),
   CORS_ORIGINS: z.string().min(1),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
@@ -90,6 +92,7 @@ const envSchema = z.object({
   DATA_ENCRYPTION_KEY: z.string().min(32),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
   RATE_LIMIT_WINDOW: z.string().min(1).default("1m"),
+  RATE_LIMIT_STORE: z.enum(["memory", "redis"]).default("memory"),
   LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
   LOGIN_RATE_LIMIT_WINDOW: z.string().min(1).default("15m"),
   STORAGE_DRIVER: z.enum(["local"]).default("local"),
@@ -142,6 +145,19 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
 
     if (!config.COOKIE_SECURE) {
       throw new Error("Production startup refused: COOKIE_SECURE must be true.");
+    }
+
+    if (config.RATE_LIMIT_STORE !== "redis") {
+      throw new Error("Production startup refused: RATE_LIMIT_STORE must be redis.");
+    }
+
+    const databaseUrl = new URL(config.DATABASE_URL);
+    if (!databaseUrl.searchParams.get("connection_limit") || !databaseUrl.searchParams.get("pool_timeout")) {
+      throw new Error("Production startup refused: DATABASE_URL must define connection_limit and pool_timeout.");
+    }
+
+    if (config.IFOOD_ENABLED && config.IFOOD_ORDER_POLLING_ENABLED !== false && !config.INTERNAL_JOB_SECRET) {
+      throw new Error("Production startup refused: INTERNAL_JOB_SECRET is required for iFood polling.");
     }
   }
 

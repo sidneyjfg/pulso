@@ -461,7 +461,8 @@ export const ifoodCatalogItemsQuerySchema = listQuerySchema.extend({
 });
 
 export const linkIfoodCatalogItemBodySchema = z.object({
-  productId: idSchema
+  productId: idSchema,
+  saveCatalogMapping: z.boolean().default(true)
 });
 
 export const createProductFromIfoodItemBodySchema = z.object({
@@ -475,9 +476,13 @@ export const createProductFromIfoodItemBodySchema = z.object({
   barcode: z.string().trim().min(4).max(32).optional()
 });
 
-export const ifoodOrderActionBodySchema = z.object({
-  action: z.enum(["START_PREPARATION", "READY_TO_PICKUP", "DISPATCH"])
-});
+export const ifoodOrderActionBodySchema = z.discriminatedUnion("action", [
+  z.object({ action: z.enum(["START_PREPARATION", "READY_TO_PICKUP", "DISPATCH"]) }),
+  z.object({
+    action: z.literal("REQUEST_CANCELLATION"),
+    reasonCode: z.string().trim().min(1).max(80)
+  })
+]);
 
 const ifoodOrderItemSchema = z.object({
   productId: idSchema,

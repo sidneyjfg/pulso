@@ -6,6 +6,25 @@ function isPrismaKnownError(error: unknown): error is { code: string } {
   return typeof error === "object" && error !== null && "code" in error;
 }
 
+function statusCodeFromError(error: unknown) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "statusCode" in error &&
+    typeof error.statusCode === "number" &&
+    error.statusCode >= 400 &&
+    error.statusCode < 500
+  ) {
+    return error.statusCode;
+  }
+
+  return null;
+}
+
+function messageFromError(error: unknown) {
+  return error instanceof Error ? error.message : "Requisicao invalida.";
+}
+
 export async function registerErrorHandler(app: FastifyInstance) {
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error, correlationId: request.correlationId }, "request failed");
@@ -32,6 +51,14 @@ export async function registerErrorHandler(app: FastifyInstance) {
       return reply.status(409).send({
         code: "CONFLICT",
         message: "Já existe um registro com estes dados."
+      });
+    }
+
+    const statusCode = statusCodeFromError(error);
+    if (statusCode) {
+      return reply.status(statusCode).send({
+        code: statusCode === 429 ? "RATE_LIMIT_EXCEEDED" : "REQUEST_ERROR",
+        message: statusCode === 429 ? "Muitas tentativas. Aguarde antes de tentar novamente." : messageFromError(error)
       });
     }
 

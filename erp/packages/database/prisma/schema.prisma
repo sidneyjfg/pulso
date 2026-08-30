@@ -265,6 +265,7 @@ model StockBalance {
   @@unique([companyId, branchId, warehouseId, productId])
   @@index([warehouseId, productId])
   @@index([companyId, branchId, productId])
+  @@index([companyId, branchId, updatedAt], map: "stock_balance_company_branch_updated_idx")
 }
 
 model StockMovement {
@@ -403,6 +404,7 @@ model Sale {
   updatedAt      DateTime   @updatedAt
 
   @@unique([companyId, idempotencyKey])
+  @@index([companyId, branchId, createdAt], map: "sale_company_branch_created_idx")
   @@index([companyId, branchId, status, createdAt])
   @@index([companyId, warehouseId, createdAt])
   @@index([companyId, customerId, createdAt])
@@ -450,6 +452,7 @@ model IfoodOrderPendingItem {
   updatedAt               DateTime @updatedAt
 
   @@index([companyId, branchId, status, createdAt], map: "ifood_pending_company_branch_status_idx")
+  @@index([companyId, branchId, integrationConnectionId, status, createdAt], map: "ifood_pending_company_branch_connection_status_idx")
   @@index([integrationConnectionId, status, createdAt], map: "ifood_pending_connection_status_idx")
   @@index([ifoodOrderId], map: "ifood_pending_order_idx")
   @@index([ifoodItemId], map: "ifood_pending_item_idx")
@@ -828,6 +831,7 @@ model WebhookEvent {
 
   @@unique([channel, externalEventId])
   @@index([companyId, status, createdAt])
+  @@index([companyId, integrationConnectionId, channel, createdAt], map: "webhook_company_connection_channel_created_idx")
   @@index([integrationConnectionId, status, createdAt])
   @@index([channel, status, createdAt])
 }
