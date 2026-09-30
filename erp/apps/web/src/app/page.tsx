@@ -60,6 +60,7 @@ import {
   createImportJob,
   createIntegrationConnection,
   createInventoryCount,
+  createRole,
   cancelPurchase,
   cancelFinancialEntry,
   cancelSale,
@@ -1127,6 +1128,47 @@ type IfoodOrdersView = "orders" | "pending" | "logs";
 type IfoodOrderStatusFilter = "ALL" | "PENDING" | "RESERVED" | "PREPARATION_STARTED" | "READY_TO_PICKUP" | "DISPATCHED" | "COMPLETED" | "CANCELLED";
 
 type ProductItem = ProductListResponse["data"][number];
+type PermissionKey =
+  | "product.read"
+  | "product.create"
+  | "product.update"
+  | "product.delete"
+  | "inventory.read"
+  | "inventory.adjust"
+  | "inventory.transfer"
+  | "sale.read"
+  | "sale.create"
+  | "sale.cancel"
+  | "purchase.read"
+  | "purchase.create"
+  | "purchase.receive"
+  | "customer.read"
+  | "customer.manage"
+  | "supplier.read"
+  | "supplier.manage"
+  | "company.read"
+  | "company.manage"
+  | "branch.read"
+  | "branch.manage"
+  | "user.read"
+  | "user.manage"
+  | "integration.read"
+  | "integration.manage"
+  | "fiscal.read"
+  | "fiscal.manage";
+type PermissionGroup = {
+  title: string;
+  description: string;
+  permissions: Array<{ key: PermissionKey; label: string }>;
+};
+type CreateUserInput = {
+  name: string;
+  email: string;
+  password: string;
+  branchIds: string[];
+  roleId?: string;
+  permissionKeys?: PermissionKey[];
+};
 type ProductEditInput = {
   sku: string;
   name: string;
@@ -1158,6 +1200,106 @@ const salePaymentOptions: Array<{ value: SalePaymentMethod; label: string }> = [
   { value: "BANK_TRANSFER", label: "Transferência" },
   { value: "OTHER", label: "Outro" }
 ];
+
+const permissionGroups: PermissionGroup[] = [
+  {
+    title: "PDV e vendas",
+    description: "Vender no balcão, consultar histórico e cancelar vendas.",
+    permissions: [
+      { key: "sale.read", label: "Ler" },
+      { key: "sale.create", label: "Criar" },
+      { key: "sale.cancel", label: "Cancelar" }
+    ]
+  },
+  {
+    title: "Integração iFood",
+    description: "Ver ou configurar conexão, catálogo e sincronização do iFood.",
+    permissions: [
+      { key: "integration.read", label: "Ler" },
+      { key: "integration.manage", label: "Editar" }
+    ]
+  },
+  {
+    title: "Produtos",
+    description: "Cadastro comercial, preços, fotos e ativação de produtos.",
+    permissions: [
+      { key: "product.read", label: "Ler" },
+      { key: "product.create", label: "Criar" },
+      { key: "product.update", label: "Editar" },
+      { key: "product.delete", label: "Excluir" }
+    ]
+  },
+  {
+    title: "Estoque",
+    description: "Saldos, ajustes, transferências e inventário.",
+    permissions: [
+      { key: "inventory.read", label: "Ler" },
+      { key: "inventory.adjust", label: "Ajustar" },
+      { key: "inventory.transfer", label: "Transferir" }
+    ]
+  },
+  {
+    title: "Compras",
+    description: "Pedidos de compra, entrada e recebimento.",
+    permissions: [
+      { key: "purchase.read", label: "Ler" },
+      { key: "purchase.create", label: "Criar" },
+      { key: "purchase.receive", label: "Receber" }
+    ]
+  },
+  {
+    title: "Clientes",
+    description: "Consulta e manutenção do cadastro de clientes.",
+    permissions: [
+      { key: "customer.read", label: "Ler" },
+      { key: "customer.manage", label: "Editar" }
+    ]
+  },
+  {
+    title: "Fornecedores",
+    description: "Consulta e manutenção do cadastro de fornecedores.",
+    permissions: [
+      { key: "supplier.read", label: "Ler" },
+      { key: "supplier.manage", label: "Editar" }
+    ]
+  },
+  {
+    title: "Empresa e lojas",
+    description: "Dados da empresa, lojas, depósitos e contexto operacional.",
+    permissions: [
+      { key: "company.read", label: "Ler empresa" },
+      { key: "company.manage", label: "Editar empresa" },
+      { key: "branch.read", label: "Ler lojas" },
+      { key: "branch.manage", label: "Editar lojas" }
+    ]
+  },
+  {
+    title: "Fiscal",
+    description: "Perfil fiscal, regras tributárias e taxas.",
+    permissions: [
+      { key: "fiscal.read", label: "Ler" },
+      { key: "fiscal.manage", label: "Editar" }
+    ]
+  },
+  {
+    title: "Usuários",
+    description: "Listar usuários ou alterar acessos e perfis.",
+    permissions: [
+      { key: "user.read", label: "Ler" },
+      { key: "user.manage", label: "Editar" }
+    ]
+  }
+];
+
+function sortedPermissionKeys(keys: string[]) {
+  return [...new Set(keys)].sort();
+}
+
+function samePermissionSet(left: string[], right: string[]) {
+  const a = sortedPermissionKeys(left);
+  const b = sortedPermissionKeys(right);
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
 
 function PurchaseCreateDialog({
   open,
@@ -5181,6 +5323,237 @@ function UserAccessDialog({
   );
 }
 
+function UserCreateDialog({
+  open,
+  roles,
+  branches,
+  isSaving,
+  onClose,
+  onSave
+}: {
+  open: boolean;
+  roles: RoleListResponse["data"];
+  branches: BranchListResponse["data"];
+  isSaving: boolean;
+  onClose: () => void;
+  onSave: (input: CreateUserInput) => void;
+}) {
+  const activeBranches = branches.filter((branch) => branch.active);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [accessMode, setAccessMode] = useState<"custom" | "role">("custom");
+  const [roleId, setRoleId] = useState("");
+  const [branchIds, setBranchIds] = useState<string[]>([]);
+  const [permissionKeys, setPermissionKeys] = useState<PermissionKey[]>(["sale.read", "sale.create"]);
+
+  useEffect(() => {
+    if (open) {
+      return;
+    }
+
+    setName("");
+    setEmail("");
+    setPassword("");
+    setAccessMode("custom");
+    setRoleId("");
+    setBranchIds([]);
+    setPermissionKeys(["sale.read", "sale.create"]);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    setBranchIds((current) => (current.length > 0 ? current : activeBranches.map((branch) => branch.id)));
+    setRoleId((current) => current || roles[0]?.id || "");
+  }, [activeBranches, open, roles]);
+
+  if (!open) {
+    return null;
+  }
+
+  function toggleBranch(branchId: string, checked: boolean) {
+    setBranchIds((current) => (checked ? [...new Set([...current, branchId])] : current.filter((id) => id !== branchId)));
+  }
+
+  function togglePermission(key: PermissionKey, checked: boolean) {
+    setPermissionKeys((current) => (checked ? [...new Set([...current, key])] : current.filter((item) => item !== key)));
+  }
+
+  function toggleGroup(group: PermissionGroup, checked: boolean) {
+    const keys = group.permissions.map((permission) => permission.key);
+    setPermissionKeys((current) =>
+      checked
+        ? [...new Set([...current, ...keys])]
+        : current.filter((key) => !keys.includes(key))
+    );
+  }
+
+  const noAccessOptions = activeBranches.length === 0 || (accessMode === "role" && roles.length === 0);
+  const selectedRole = roles.find((role) => role.id === roleId);
+  const selectedRolePermissionCount = selectedRole?.permissions.length ?? 0;
+  const customPermissionCount = permissionKeys.length;
+  const canSubmit =
+    name.trim().length >= 2 &&
+    email.trim().length > 0 &&
+    password.length >= 10 &&
+    branchIds.length > 0 &&
+    (accessMode === "role" ? Boolean(roleId) : permissionKeys.length > 0);
+
+  return (
+    <div className="custom-scrollbar fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/60 px-4 py-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="create-user-title">
+      <div className="auth-card-enter flex max-h-[calc(100svh-2rem)] min-h-0 w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-white shadow-2xl">
+        <div className="shrink-0 flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Acesso</p>
+            <h2 id="create-user-title" className="mt-1 text-lg font-semibold text-slate-950">Novo usuário</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Informe os dados de login e escolha exatamente o que essa pessoa pode acessar.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-muted-foreground transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Fechar novo usuário">
+            <X aria-hidden="true" size={18} />
+          </button>
+        </div>
+
+        <form
+          className="custom-scrollbar grid min-h-0 gap-5 overflow-y-auto p-5 [scrollbar-gutter:stable]"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave({
+              name: name.trim(),
+              email: email.trim().toLowerCase(),
+              password,
+              branchIds,
+              ...(accessMode === "role" ? { roleId } : { permissionKeys })
+            });
+          }}
+        >
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Nome
+              <input value={name} onChange={(event) => setName(event.target.value)} required minLength={2} maxLength={120} placeholder="Nome do usuário" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              E-mail
+              <input value={email} onChange={(event) => setEmail(event.target.value)} required type="email" maxLength={254} placeholder="usuario@empresa.com" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-950">
+              Senha inicial
+              <input value={password} onChange={(event) => setPassword(event.target.value)} required type="password" minLength={10} maxLength={256} placeholder="Mínimo 10 caracteres" className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500" />
+            </label>
+          </div>
+
+          <section className="rounded-lg border border-border">
+            <div className="border-b border-border px-4 py-3">
+              <h3 className="text-sm font-semibold text-slate-950">Lojas permitidas</h3>
+              <p className="mt-1 text-xs text-muted-foreground">Ative somente as lojas que esse usuário pode operar ou consultar.</p>
+            </div>
+            <div className="grid gap-1 p-2 md:grid-cols-2">
+              {branches.map((branch) => (
+                <label key={branch.id} className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-sm transition-colors hover:bg-slate-50">
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-slate-950">{branch.name}</span>
+                    <span className="text-xs text-muted-foreground">{branch.active ? "Ativa" : "Inativa"}</span>
+                  </span>
+                  <ModernSwitch checked={branchIds.includes(branch.id)} onCheckedChange={(checked) => toggleBranch(branch.id, checked)} label={`Permitir ${branch.name}`} disabled={!branch.active} />
+                </label>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-border">
+            <div className="flex flex-col gap-3 border-b border-border px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-950">Permissões por módulo</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Use um perfil salvo ou monte permissões específicas para este usuário.</p>
+              </div>
+              <div className="inline-flex rounded-md border border-border bg-slate-50 p-1">
+                <button type="button" onClick={() => setAccessMode("custom")} className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${accessMode === "custom" ? "bg-white text-slate-950 shadow-sm" : "text-muted-foreground hover:text-slate-950"}`}>Personalizado</button>
+                <button type="button" onClick={() => setAccessMode("role")} className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${accessMode === "role" ? "bg-white text-slate-950 shadow-sm" : "text-muted-foreground hover:text-slate-950"}`}>Perfil salvo</button>
+              </div>
+            </div>
+
+            {accessMode === "role" ? (
+              <div className="grid gap-3 p-4">
+                <label className="grid gap-2 text-sm font-medium text-slate-950">
+                  Perfil de acesso
+                  <select value={roleId} onChange={(event) => setRoleId(event.target.value)} className="rounded-md border border-border bg-white px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500">
+                    <option value="" disabled>Selecione um perfil</option>
+                    {roles.map((role) => (
+                      <option key={role.id} value={role.id}>
+                        {role.name} · {role.permissions.length} permissões
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-xs text-muted-foreground">{selectedRole ? `${selectedRole.name} concede ${selectedRolePermissionCount} permissões.` : "Nenhum perfil selecionado."}</p>
+              </div>
+            ) : (
+              <div className="grid gap-3 p-3">
+                {permissionGroups.map((group) => {
+                  const groupKeys = group.permissions.map((permission) => permission.key);
+                  const allChecked = groupKeys.every((key) => permissionKeys.includes(key));
+                  const someChecked = groupKeys.some((key) => permissionKeys.includes(key));
+                  return (
+                    <article key={group.title} className="rounded-md border border-border bg-white p-3">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div className="min-w-0">
+                          <h4 className="text-sm font-semibold text-slate-950">{group.title}</h4>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">{group.description}</p>
+                        </div>
+                        <ModernSwitch checked={allChecked} onCheckedChange={(checked) => toggleGroup(group, checked)} label={`${allChecked ? "Desativar" : "Ativar"} ${group.title}`} />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {group.permissions.map((permission) => {
+                          const checked = permissionKeys.includes(permission.key);
+                          return (
+                            <button
+                              key={`${group.title}-${permission.key}`}
+                              type="button"
+                              onClick={() => togglePermission(permission.key, !checked)}
+                              className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-[transform,border-color,background-color,color] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                                checked ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-border bg-white text-slate-700 hover:border-emerald-200 hover:bg-emerald-50"
+                              }`}
+                            >
+                              {checked ? <Check aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}
+                              {permission.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {someChecked && !allChecked ? <p className="mt-2 text-xs text-muted-foreground">Módulo parcialmente liberado.</p> : null}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          {noAccessOptions ? <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Cadastre ao menos uma loja ativa e um perfil quando usar perfil salvo.</p> : null}
+
+          <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground">{accessMode === "custom" ? `${customPermissionCount} permissões selecionadas.` : `${selectedRolePermissionCount} permissões no perfil escolhido.`}</p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-2 text-sm font-medium text-slate-950 transition-[transform,background-color] hover:bg-slate-50 active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving || noAccessOptions || !canSubmit}
+                className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white transition-[transform,background-color] hover:bg-emerald-700 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                {isSaving ? <Loader2 aria-hidden="true" size={16} className="animate-spin" /> : <Users aria-hidden="true" size={16} />}
+                Criar usuário
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function UsersPermissionSection({
   query,
   roles,
@@ -5670,6 +6043,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
   const [newBranchName, setNewBranchName] = useState("");
   const [newBranchWarehouseName, setNewBranchWarehouseName] = useState("Estoque Principal");
   const [selectedUser, setSelectedUser] = useState<UserItem | null>(null);
+  const [createUserDialogOpen, setCreateUserDialogOpen] = useState(false);
   const [productLimit, setProductLimit] = useState(10);
   const [productCursorStack, setProductCursorStack] = useState<Array<string | null>>([null]);
   const [productSearchDraft, setProductSearchDraft] = useState("");
@@ -5997,6 +6371,56 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
         tone: "warning",
         title: "Não foi possível salvar permissões.",
         description: error instanceof Error ? error.message : "Confira perfil, lojas e permissões do seu usuário."
+      });
+    }
+  });
+  const userCreateMutation = useMutation({
+    mutationFn: async (input: CreateUserInput) => {
+      let roleId = input.roleId ?? "";
+      const permissionKeys = sortedPermissionKeys(input.permissionKeys ?? []);
+
+      if (!roleId) {
+        const existingRole = (rolesQuery.data?.data ?? []).find((role) =>
+          samePermissionSet(role.permissions.map((item) => item.permission.key), permissionKeys)
+        );
+        roleId = existingRole?.id ?? "";
+      }
+
+      if (!roleId) {
+        const roleNameBase = input.name.trim().slice(0, 42) || input.email.split("@")[0] || "usuario";
+        const createdRole = await createRole(accessToken, {
+          name: `Perfil ${roleNameBase} ${Date.now()}`,
+          scope: "COMPANY",
+          permissionKeys
+        });
+        roleId = createdRole.id;
+      }
+
+      return createUser(accessToken, {
+        name: input.name,
+        email: input.email,
+        password: input.password,
+        roleId,
+        branchIds: input.branchIds
+      });
+    },
+    onSuccess: async () => {
+      setCreateUserDialogOpen(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["users", accessToken] }),
+        queryClient.invalidateQueries({ queryKey: ["roles", accessToken] })
+      ]);
+      setAlert({
+        tone: "success",
+        title: "Usuário criado.",
+        description: "O e-mail, lojas e permissões foram salvos para a empresa atual."
+      });
+    },
+    onError: (error) => {
+      setAlert({
+        tone: "warning",
+        title: "Não foi possível criar usuário.",
+        description: error instanceof Error ? error.message : "Revise e-mail, senha, lojas e permissões."
       });
     }
   });
@@ -6658,21 +7082,6 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           return createReportJob(token, {
             type: "SALES",
             filters: { preset: "today" }
-          });
-        }
-        case "users": {
-          const [roles, branches] = await Promise.all([getRoles(token, { limit: 100 }), getBranches(token, { limit: 100 })]);
-          const activeBranches = branches.data.filter((branch) => branch.active);
-          const role = roles.data[0];
-          if (!role || activeBranches.length === 0) {
-            throw new Error("É preciso ter ao menos 1 perfil e 1 loja ativa para criar usuário.");
-          }
-          return createUser(token, {
-            name: `Usuário ${new Date(timestamp).toLocaleTimeString("pt-BR")}`,
-            email: `usuario.${suffix}@local.test`,
-            password: "UserFlow123!",
-            roleId: role.id,
-            branchIds: activeBranches.map((branch) => branch.id)
           });
         }
         case "multistore": {
@@ -7893,7 +8302,7 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
             onPrevious={goToPreviousOperationalPage}
             onNext={goToNextOperationalPage}
             onEditUser={setSelectedUser}
-            onCreateUser={() => runOperationalPrimaryAction("users")}
+            onCreateUser={() => setCreateUserDialogOpen(true)}
           />
         ) : null}
 
@@ -8132,6 +8541,14 @@ function Dashboard({ accessToken, onSessionChange, onLogout }: { accessToken: st
           }
           userAccessMutation.mutate({ userId: selectedUser.id, ...input });
         }}
+      />
+      <UserCreateDialog
+        open={createUserDialogOpen}
+        roles={rolesQuery.data?.data ?? []}
+        branches={branchesQuery.data?.data ?? []}
+        isSaving={userCreateMutation.isPending}
+        onClose={() => setCreateUserDialogOpen(false)}
+        onSave={(input) => userCreateMutation.mutate(input)}
       />
       {isOperationalActionPending ? <BusyOverlay message={busyMessage} /> : null}
     </main>

@@ -527,6 +527,17 @@ export async function updateUserAccess(accessToken: string, userId: string, body
   return parseResponse<UserListResponse["data"][number]>(response);
 }
 
+export async function createRole(
+  accessToken: string,
+  body: {
+    name: string;
+    scope: "ORGANIZATION" | "COMPANY" | "BRANCH";
+    permissionKeys: string[];
+  }
+) {
+  return requestWithBody<{ id: string; name: string; scope: string }, typeof body>(accessToken, "POST", "/api/v1/roles", body);
+}
+
 export async function createBranch(accessToken: string, body: { name: string; defaultWarehouseName?: string }) {
   const response = await fetch(`${API_URL}/api/v1/branches`, {
     method: "POST",
